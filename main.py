@@ -945,7 +945,7 @@ async def txt_handler(bot: Client, m: Message):
                 pass  # handle zip links
 
             elif "childId" in url and "parentId" in url:
-                url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={raw_text4}"
+                url = f"https://anonymouspwplayerr-c96de7802811.herokuapp.com/pw?url={url}&token={raw_text4}"
 
             if "edge.api.brightcove.com" in url:
                 pass
