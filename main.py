@@ -1015,9 +1015,7 @@ async def txt_handler(bot: Client, m: Message):
                url = before.strip()
                # sirf ? se pehle wale part me change
                path, sep, query = url.partition("?")
-               if path.endswith(".mp4"):
-                 path = path[:-4] + ".mkv"
-                 url = path + sep + query
+               url = path + sep + query
                  
     # URL = * se pehle wala
                
@@ -1500,6 +1498,7 @@ async def txt_handler(bot: Client, m: Message):
                     prog1 = await m.reply_text(Show1, disable_web_page_preview=True)
                     res_file = await helper.decrypt_and_merge_video(mpd, keys_string, path, name, raw_text2)
                     filename = res_file
+                    await prog1.delete(True)
                     await prog.delete(True)
                     await helper.send_vid(bot, m, cc, filename, thumb, name, prog, channel_id, watermark=watermark )
                     count += 1
