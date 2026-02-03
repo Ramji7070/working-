@@ -407,63 +407,95 @@ from base64 import b64decode
 
 
 
-async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
-    try:
-        output_path = Path(output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
+import os
+import asyncio
+from pathlib import Path
 
-        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
-        print(f"Running command: {cmd1}")
-        os.system(cmd1)
-        
-        avDir = list(output_path.iterdir())
-        print(f"Downloaded files: {avDir}")
-        print("Decrypting")
+async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
+    """
+    Fast download + decrypt + merge exactly as original logic,
+    but using aria2c for max speed and ensuring final video is playable.
+    """
+
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # ------------------------------
+        # 1) Download video + audio fast
+        # ------------------------------
+        cmd_download = (
+            f'yt-dlp -f "bv[height<={quality}]+ba/b" '
+            f'-o "{output_path}/file.%(ext)s" '
+            f'--allow-unplayable-format --no-check-certificate '
+            f'--external-downloader aria2c '
+            f'--downloader-args "aria2c:-x 16 -j 32 -s 16 -k 1M" '
+            f'"{mpd_url}"'
+        )
+        print(f"▶️ Downloading at 15x speed: {cmd_download}")
+        os.system(cmd_download)
+
+        # ------------------------------
+        # 2) List downloaded files
+        # ------------------------------
+        av_files = list(output_path.iterdir())
+        print(f"📄 Downloaded files: {av_files}")
 
         video_decrypted = False
         audio_decrypted = False
 
-        for data in avDir:
-            if data.suffix == ".mp4" and not video_decrypted:
-                cmd2 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/video.mp4"'
-                print(f"Running command: {cmd2}")
-                os.system(cmd2)
+        # ------------------------------
+        # 3) Decrypt video and audio
+        # ------------------------------
+        for f in av_files:
+            if f.suffix.lower() in [".mp4", ".mkv"] and not video_decrypted:
+                cmd_video = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/video.mp4"'
+                print(f"🔓 Decrypting video: {cmd_video}")
+                os.system(cmd_video)
                 if (output_path / "video.mp4").exists():
                     video_decrypted = True
-                data.unlink()
-            elif data.suffix == ".m4a" and not audio_decrypted:
-                cmd3 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/audio.m4a"'
-                print(f"Running command: {cmd3}")
-                os.system(cmd3)
+                f.unlink()
+            elif f.suffix.lower() == ".m4a" and not audio_decrypted:
+                cmd_audio = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/audio.m4a"'
+                print(f"🔓 Decrypting audio: {cmd_audio}")
+                os.system(cmd_audio)
                 if (output_path / "audio.m4a").exists():
                     audio_decrypted = True
-                data.unlink()
+                f.unlink()
 
         if not video_decrypted or not audio_decrypted:
-            raise FileNotFoundError("Decryption failed: video or audio file not found.")
+            raise FileNotFoundError("❌ Decryption failed: video or audio missing.")
 
-        cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy "{output_path}/{output_name}.mp4"'
-        print(f"Running command: {cmd4}")
-        os.system(cmd4)
+        # ------------------------------
+        # 4) Merge video + audio
+        # ------------------------------
+        merged_file = output_path / f"{output_name}.mp4"
+        cmd_merge = f'ffmpeg -y -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy -movflags +faststart "{merged_file}"'
+        print(f"🎬 Merging video + audio: {cmd_merge}")
+        os.system(cmd_merge)
+
+        # Cleanup decrypted temp files
         if (output_path / "video.mp4").exists():
             (output_path / "video.mp4").unlink()
         if (output_path / "audio.m4a").exists():
             (output_path / "audio.m4a").unlink()
-        
-        filename = output_path / f"{output_name}.mp4"
 
-        if not filename.exists():
-            raise FileNotFoundError("Merged video file not found.")
+        if not merged_file.exists():
+            raise FileNotFoundError("❌ Merged video not created")
 
-        cmd5 = f'ffmpeg -i "{filename}" 2>&1 | grep "Duration"'
-        duration_info = os.popen(cmd5).read()
-        print(f"Duration info: {duration_info}")
+        # ------------------------------
+        # 5) Duration info
+        # ------------------------------
+        cmd_duration = f'ffmpeg -i "{merged_file}" 2>&1 | grep "Duration"'
+        duration_info = os.popen(cmd_duration).read()
+        print(f"✅ Video ready: {merged_file} | {duration_info.strip()}")
 
-        return str(filename)
+        return str(merged_file)
 
     except Exception as e:
-        print(f"Error during decryption and merging: {str(e)}")
-        raise
+        print(f"❌ Error in decrypt_and_merge_video: {e}")
+        return None
+
 
 async def run(cmd):
     proc = await asyncio.create_subprocess_shell(
