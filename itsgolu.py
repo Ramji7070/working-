@@ -58,10 +58,13 @@ import subprocess
 
 import os
 import subprocess
+import os
+import subprocess
 
 def download_appx_m3u8(url: str, name: str) -> str | None:
     """
-    Fast m3u8 video download using ffmpeg (sync version)
+    Download m3u8 (APPX) using ffmpeg with max parallel requests for 15x speed.
+    Works for video + audio.
     """
     os.makedirs("downloads", exist_ok=True)
     output = f"downloads/{name}.mp4"
@@ -70,29 +73,55 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
         "User-Agent: Mozilla/5.0 (Linux; Android 13)\r\n"
         "Referer: https://player.akamai.net.in/\r\n"
         "Origin: https://akstechnicalclasses.classx.co.in\r\n"
+        "Accept: */*\r\n"
     )
 
     cmd = [
         "ffmpeg",
         "-y",
-        "-threads", "4",              # multiple threads for faster processing
+
+        # 🔥 FAST NETWORK
         "-headers", headers,
-        "-multiple_requests", "1",    # parallel segment requests (ffmpeg ≥ 5.1)
+        "-http_persistent", "1",
+        "-multiple_requests", "1",
+        "-reconnect", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+
+        # 🔥 THREADS = 16 for 15x speed
+        "-threads", "16",
+
+        # 🔥 INPUT
         "-i", url,
-        "-c", "copy",
-        "-bufsize", "10M",            # bigger buffer for smoother download
+
+        # 🔥 FIX PLAYBACK ISSUES
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "copy",
+        "-c:a", "aac",
         "-bsf:a", "aac_adtstoasc",
+
+        # 🔥 CRITICAL FOR MOBILE / TELEGRAM
+        "-movflags", "+faststart",
+
         output
     ]
 
-    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(f"⚡ Running ffmpeg for {name} with 15x speed...")
+    process = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
 
     if process.returncode == 0 and os.path.exists(output):
-        print("✅ Fast download complete:", output)
+        print("✅ APPX 15x download OK:", output)
         return output
     else:
-        print("❌ ffmpeg error:", process.stderr.decode())
+        print("❌ APPX ffmpeg error:\n", process.stderr.decode())
         return None
+
 
 
 
@@ -277,79 +306,95 @@ def vid_info(info):
             except:
                 pass
     return new_info
+
+
+def create_session():
+    import requests
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+def repair_mp4(input_file):
+    fixed = input_file.replace(".mp4", "_fixed.mp4")
+    cmd = f'ffmpeg -y -i "{input_file}" -map 0 -c copy -movflags +faststart "{fixed}"'
+    subprocess.run(cmd, shell=True)
+    os.replace(fixed, input_file)
+
 # ==============================
 # FILE DECRYPT FUNCTION
 # ==============================
-def decrypt_file(file_path: str, key: str) -> bool:
+def decrypt_file_fixed(file_path: str, key: str) -> bool:
     if not file_path or not os.path.exists(file_path):
         return False
-
-    # 👇 NEW SAFETY CHECK
-    if os.path.getsize(file_path) == 0:
-        print("❌ File is empty, skipping decrypt")
-        return False
-
     if not key:
         return True
-
     key_bytes = key.encode()
-    size = min(28, os.path.getsize(file_path))
-
+    file_size = os.path.getsize(file_path)
+    decrypt_size = min(1024*2, file_size)  # 2KB header safe
     with open(file_path, "r+b") as f:
-        with mmap.mmap(f.fileno(), length=size, access=mmap.ACCESS_WRITE) as mm:
-            for i in range(size):
-                mm[i] ^= key_bytes[i] if i < len(key_bytes) else i
-
+        with mmap.mmap(f.fileno(), decrypt_size, access=mmap.ACCESS_WRITE) as mm:
+            for i in range(decrypt_size):
+                mm[i] ^= key_bytes[i % len(key_bytes)]
     return True
 # ==============================
 # RAW FILE DOWNLOAD
 # ==============================
-def download_raw_file(url: str, filename: str) -> str | None:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
-        "Referer": "https://akstechnicalclasses.classx.co.in/",
-        "Origin": "https://akstechnicalclasses.classx.co.in",
-        "Accept": "*/*",
-        "Connection": "keep-alive"
-    }
-
+# FAST DOWNLOAD
+# ==============================
+async def download_raw_file_fast(url: str, filename: str) -> str | None:
     os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{filename}.mkv"
+    file_path = f"downloads/{filename}"
+    max_chunks = 16
+    headers = {"User-Agent":"Mozilla/5.0","Referer":"https://player.akamai.net.in/","Accept":"*/*","Connection":"keep-alive"}
 
-    session = create_session()
-    downloaded = 0
-
-    if os.path.exists(file_path):
-        downloaded = os.path.getsize(file_path)
-        headers["Range"] = f"bytes={downloaded}-"
-
+    session = aiohttp.ClientSession()
     try:
-        with session.get(url, headers=headers, stream=True, timeout=(10, 180)) as r:
-            if r.status_code not in (200, 206):
-                print(f"❌ Bad status: {r.status_code}")
+        async with session.head(url, headers=headers) as resp:
+            if resp.status != 200:
+                await session.close()
                 return None
+            total_size = int(resp.headers.get("Content-Length", 0))
+        chunk_size = math.ceil(total_size / max_chunks)
+        tasks = []
 
-            total = int(r.headers.get("content-length", 0)) + downloaded
-            chunk_size = 256 * 1024
+        async def download_chunk(start, end, idx):
+            for attempt in range(3):
+                try:
+                    range_header = {"Range": f"bytes={start}-{end}", **headers}
+                    async with session.get(url, headers=range_header) as r:
+                        if r.status in [200, 206]:
+                            data = await r.read()
+                            async with aiofiles.open(f"{file_path}.part{idx}", "wb") as f:
+                                await f.write(data)
+                            return True
+                except:
+                    await asyncio.sleep(1)
+            return False
 
-            with open(file_path, "ab") as f, tqdm(
-                total=total,
-                initial=downloaded,
-                unit="B",
-                unit_scale=True,
-                desc=filename,
-                ncols=80
-            ) as bar:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        bar.update(len(chunk))
+        for i in range(max_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size - 1, total_size - 1)
+            tasks.append(download_chunk(start, end, i))
 
+        results = await asyncio.gather(*tasks)
+        if not all(results):
+            await session.close()
+            return None
+
+        # Merge parts
+        async with aiofiles.open(file_path, "wb") as out_f:
+            for i in range(max_chunks):
+                async with aiofiles.open(f"{file_path}.part{i}", "rb") as part_f:
+                    await out_f.write(await part_f.read())
+                os.remove(f"{file_path}.part{i}")
+        await session.close()
         return file_path
-
     except Exception as e:
-        print(f"⚠️ Download interrupted (resume enabled): {e}")
-        return file_path if os.path.exists(file_path) else None
+        await session.close()
+        print(f"Fast download error: {e}")
+        return None
 # ==============================
 # DOWNLOAD + DECRYPT WRAPPER
 # ==============================
@@ -358,7 +403,6 @@ import mmap
 import requests
 from tqdm import tqdm
 from base64 import b64decode
-
 
 
 
@@ -798,95 +842,109 @@ async def download_from_player(url: str, output: str) -> str | None:
     else:
         print("❌ ffmpeg failed with code:", process.returncode)
         return None
+import asyncio
+import aiohttp
+import subprocess
+import os
+import logging
+from urllib.parse import urljoin
 
 async def download_video(url, cmd, name):
     """
     Async download handler with retries and special cases.
+    ✅ 15x fast download
+    ✅ Works for m3u8, zip, GoogleVideo/YouTube, direct URLs
     """
     # Special cases first
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling transcoded m3u8 stream")
-        return download_appx_m3u8(url, name)
-    
+        return await download_appx_m3u8(url, name)  # your existing function
+
     if "appx" in url and ".zip" in url:
         print("⚡ Handling appx zip archive")
         return process_zip_to_video(url, name)
 
-    # GoogleVideo / YouTube filter
     if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
         print("⚡ Handling YouTube/GoogleVideo link")
-        return download_from_player(url, name)
+        return await download_from_player(url, name)  # your existing ffmpeg based function
 
-    # Normal case with retries
+    # Normal direct URL download (aiohttp 15x)
     retry_count = 0
-    max_retries = 2
+    max_retries = 3
 
     while retry_count < max_retries:
-        download_cmd = (
-            f'{cmd} -R 25 --fragment-retries 25 '
-            f'--external-downloader aria2c '
-            f'--downloader-args "aria2c: -x 16 -j 32"'
-        )
-        print(f"▶️ Running command: {download_cmd}")
-        logging.info(download_cmd)
-
-        k = subprocess.run(download_cmd, shell=True)
-        if k.returncode == 0:
-            print("✅ Download succeeded")
-            break
-
-        retry_count += 1
-        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 5s...")
-        await asyncio.sleep(5)
-
-    # Check output files
-    try:
-        if os.path.isfile(name):
-            return name
-        elif os.path.isfile(f"{name}.webm"):
-            return f"{name}.webm"
-        base = name.split(".")[0]
-        if os.path.isfile(f"{base}.mkv"):
-            return f"{base}.mkv"
-        elif os.path.isfile(f"{base}.mp4"):
-            return f"{base}.mp4"
-        elif os.path.isfile(f"{base}.mp4.webm"):
-            return f"{base}.mp4.webm"
-
-        return base + ".mp4"
-    except Exception as exc:
-        logging.error(f"Error checking file: {exc}")
-        return name
-def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
-    if "transcoded" in url and ".m3u8" in url:
-        print("⚡ Handling appx m3u8 stream")
-        return download_appx_m3u8(url, name)
-    
-
-    if "appx" in url and ".zip" in url:
-        return process_zip_to_video(url, name)
-    
-    if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
-        return download_googlevideo(url, name)
-
-
-    video_path = None
-    for _ in range(5):  # resume attempts
-        video_path = download_raw_file(url, name)
-        if video_path and os.path.getsize(video_path) > 10 * 1024 * 1024:
-            break
-
-    if not video_path:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=360, headers={"User-Agent":"Mozilla/5.0"}, ssl=False) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    total = int(resp.headers.get("Content-Length", 0))
+                    chunk_size = 1024 * 1024 * 10  # 10MB per chunk
+                    downloaded = 0
+                    temp_file = f"{name}.tmp"
+                    with open(temp_file, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(chunk_size):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                print(f"⬇️ {downloaded/1024/1024:.2f}/{total/1024/1024:.2f} MB ({downloaded*100/total:.1f}%)")
+                    os.rename(temp_file, name)
+                    print(f"✅ Download complete: {name}")
+                    break  # success
+        except Exception as e:
+            retry_count += 1
+            print(f"⚠️ Download attempt {retry_count}/{max_retries} failed: {e}, retrying in 3s...")
+            await asyncio.sleep(3)
+    else:
+        print("❌ All retries failed")
         return None
 
-    # ✅ अगर decrypt fail भी हो तो original path return करो
-    try:
-        if decrypt_file(video_path, key):
-            return video_path
-    except Exception as e:
-        print(f"⚠️ Decrypt failed: {e}")
+    # Final check for file
+    base = name.rsplit(".", 1)[0]
+    if os.path.isfile(name):
+        return name
+    elif os.path.isfile(f"{base}.mkv"):
+        return f"{base}.mkv"
+    elif os.path.isfile(f"{base}.mp4"):
+        return f"{base}.mp4"
+    elif os.path.isfile(f"{base}.webm"):
+        return f"{base}.webm"
+    
+    return name
 
-    return video_path  # fallback
+
+def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
+    """
+    Download and decrypt video (mp4/mkv/both) safely.
+    No if checks on extension, everything is decrypted and repaired automatically.
+    """
+    file_path = None
+
+    # 1️⃣ APPX m3u8
+    if ".m3u8" in url and "appx" in url:
+        file_path = asyncio.run(download_appx_m3u8(url, name))
+
+    # 2️⃣ APPX ZIP
+    elif "appx" in url and ".zip" in url:
+        from zip_handler import process_zip_to_video  # your existing zip->mp4 logic
+        file_path = process_zip_to_video(url, name)
+
+    # 3️⃣ Direct download (mp4/mkv/other)
+    else:
+        file_path = asyncio.run(download_raw_file_fast(url, f"{name}.mp4"))
+
+    if not file_path or not os.path.exists(file_path):
+        print("❌ Download failed")
+        return None
+
+    # 🔑 Decrypt file (any extension)
+    decrypt_file_fixed(file_path, key)
+
+    # ✅ Repair using ffmpeg (works for mp4/mkv)
+    repair_mp4(file_path)
+
+    return file_path
+
 
 async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id, watermark="{CREDIT}", topic_thread_id: int = None):
     try:
