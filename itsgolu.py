@@ -30,12 +30,14 @@ import requests
 
 def create_session():
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=10,
+        pool_maxsize=10,
+        max_retries=3
+    )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
-
-
 import os
 import requests
 import zipfile
@@ -60,6 +62,13 @@ import os
 import subprocess
 
 def download_appx_m3u8(url: str, name: str) -> str | None:
+    """
+    Ultra-fast m3u8 download using ffmpeg with:
+    - Multiple threads
+    - Parallel segment requests
+    - Retry on failure
+    - Faststart for mobile/telegram compatibility
+    """
     os.makedirs("downloads", exist_ok=True)
     output = f"downloads/{name}.mp4"
 
@@ -70,44 +79,100 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
         "Accept: */*\r\n"
     )
 
+    # FFmpeg command
     cmd = [
-        "ffmpeg", "-protocol_whitelist", "file,http,https,tcp,tls",
-        "-allowed_extensions", "ALL",
+        "ffmpeg",
         "-y",
-        "-headers", headers,
-        "-http_persistent", "1",
-        "-multiple_requests", "1",
-        "-reconnect", "1",
+        "-threads", "16",                   # multi-threaded
+        "-http_persistent", "1",            # persistent HTTP connection
+        "-multiple_requests", "1",           # parallel segment download
+        "-reconnect", "1",                   # auto reconnect
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
-        "-threads", "16",
+        "-headers", headers,
         "-i", url,
-        "-map", "0:v:0",
-        "-map", "0:a?",
         "-c:v", "copy",
         "-c:a", "aac",
         "-bsf:a", "aac_adtstoasc",
-        "-movflags", "+faststart",
+        "-movflags", "+faststart",          # for smooth streaming
         output
     ]
 
-    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if process.returncode == 0 and os.path.exists(output):
-        return output
-    else:
-        print("❌ ffmpeg error:\n", process.stderr.decode())
+    print(f"⚡ Ultra-fast FFmpeg download started: {name}")
+
+    try:
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600)
+        if process.returncode == 0 and os.path.exists(output):
+            print("✅ Download completed successfully:", output)
+            return output
+        else:
+            print("❌ FFmpeg failed, retrying once...")
+            print(process.stderr.decode())
+
+            # Retry once more
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600)
+            if process.returncode == 0 and os.path.exists(output):
+                print("✅ Download succeeded on retry:", output)
+                return output
+            else:
+                print("❌ Retry failed:\n", process.stderr.decode())
+                return None
+
+    except subprocess.TimeoutExpired:
+        print("❌ FFmpeg timed out!")
+        return None
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
         return None
 
 
+
+
+def download_youtube(url, name, output_path="downloads"):
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+        print(f"[INFO] Created directory: {output_path}")
+
+    print(f"[INFO] Starting YouTube download for: {url}")
+
+    ydl_opts = {
+        "format": "bestvideo+bestaudio/best",   # HD quality
+        "merge_output_format": "mp4",           # final file format
+        "outtmpl": os.path.join(output_path, f"{name}.%(ext)s"),
+        "noplaylist": True,
+        "quiet": False,
+        "extractor_args": {"youtube": {"player_client": ["default"]}},  # avoid JS runtime warning
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        print("[SUCCESS] YouTube download completed.")
+        return os.path.join(output_path, f"{name}.mp4")
+    except Exception as e:
+        print(f"[ERROR] YouTube download failed: {e}")
+        return None
+
+
+
+def process_url(url):
+    if "youtube" in url:
+        print("[INFO] Detected YouTube URL.")
+        download_youtube_video(url)
+    else:
+        print("[INFO] Unsupported URL type.")
+
+
+# ==============================
 def get_duration(filename):
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", filename],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filename],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT
     )
     return float(result.stdout)
-
 
 def split_large_video(file_path, max_size_mb=1900):
     size_bytes = os.path.getsize(file_path)
@@ -138,29 +203,6 @@ def split_large_video(file_path, max_size_mb=1900):
 
     return output_files
 
-
-def duration(filename: str) -> float:
-    """
-    Get video duration in seconds using ffprobe.
-    Returns 0.0 if duration cannot be determined.
-    """
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                filename
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=True
-        )
-        output = result.stdout.decode().strip()
-        return float(output) if output else 0.0
-    except Exception as e:
-        print(f"⚠️ ffprobe error for {filename}: {e}")
-        return 0.0
 
 
 def get_mps_and_keys(api_url):
@@ -234,6 +276,31 @@ def parse_vid_info(info):
                 pass
     return new_info
 
+def duration(filename: str) -> float:
+    """
+    Get video duration in seconds using ffprobe.
+    Returns 0.0 if duration cannot be determined.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                filename
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=True
+        )
+        output = result.stdout.decode().strip()
+        return float(output) if output else 0.0
+    except Exception as e:
+        print(f"⚠️ ffprobe error for {filename}: {e}")
+        return 0.0
+
+
+
 
 def vid_info(info):
     info = info.strip()
@@ -260,82 +327,160 @@ def vid_info(info):
             except:
                 pass
     return new_info
+# ==============================
+# FILE DECRYPT FUNCTION
+# ==============================
+import os
+import mmap
+import subprocess
 
+def repair_mp4(input_file: str) -> bool:
+    """
+    Repair MP4 file to make it streamable (faststart).
+    Returns True if successful.
+    """
+    if not os.path.exists(input_file):
+        print(f"❌ File not found: {input_file}")
+        return False
 
-def create_session():
-    import requests
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-def repair_mp4(input_file):
     fixed = input_file.replace(".mp4", "_fixed.mp4")
-    cmd = f'ffmpeg -y -i "{input_file}" -map 0 -c copy -movflags +faststart "{fixed}"'
-    subprocess.run(cmd, shell=True)
-    os.replace(fixed, input_file)
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", input_file,
+            "-map", "0",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            fixed
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            print(f"❌ FFmpeg repair failed:\n{result.stderr.decode()}")
+            return False
+
+        # Replace original file
+        os.replace(fixed, input_file)
+        print(f"✅ MP4 repaired successfully: {input_file}")
+        return True
+
+    except Exception as e:
+        print(f"❌ Exception during repair_mp4: {e}")
+        return False
+
 
 def decrypt_file_fixed(file_path: str, key: str) -> bool:
+    """
+    XOR decrypt first 2KB of file (safe for headers)
+    Returns True if successful
+    """
     if not file_path or not os.path.exists(file_path):
+        print(f"❌ File not found: {file_path}")
         return False
+
     if not key:
+        return True  # nothing to decrypt
+
+    try:
+        key_bytes = key.encode()
+        file_size = os.path.getsize(file_path)
+        decrypt_size = min(1024*2, file_size)  # first 2KB only
+
+        with open(file_path, "r+b") as f:
+            with mmap.mmap(f.fileno(), decrypt_size, access=mmap.ACCESS_WRITE) as mm:
+                for i in range(decrypt_size):
+                    mm[i] ^= key_bytes[i % len(key_bytes)]
+
+        print(f"✅ File decrypted successfully: {file_path}")
         return True
-    key_bytes = key.encode()
-    file_size = os.path.getsize(file_path)
-    decrypt_size = min(1024*2, file_size)
-    with open(file_path, "r+b") as f:
-        with mmap.mmap(f.fileno(), decrypt_size, access=mmap.ACCESS_WRITE) as mm:
-            for i in range(decrypt_size):
-                mm[i] ^= key_bytes[i % len(key_bytes)]
-    return True
-#===============
+
+    except Exception as e:
+        print(f"❌ Exception during decrypt_file_fixed: {e}")
+        return False
+
+# ==============================
 # RAW FILE DOWNLOAD
 # ==============================
-# FAST DOWNLOAD
-# ==============================
-async def download_raw_file_fast(url: str, filename: str) -> str | None:
+import os
+import math
+import requests
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+
+def download_raw_file_fast(url: str, filename: str, threads: int = 8) -> str | None:
+    """
+    Ultra-fast multi-threaded download with resume support
+    """
     os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{filename}"
-    max_chunks = 16
-    headers = {"User-Agent":"Mozilla/5.0","Referer":"https://player.akamai.net.in/","Accept":"*/*","Connection":"keep-alive"}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.head(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                total_size = int(resp.headers.get("Content-Length", 0))
-            chunk_size = math.ceil(total_size / max_chunks)
-            tasks = []
-            async def download_chunk(start, end, idx):
-                for attempt in range(3):
-                    try:
-                        range_header = {"Range": f"bytes={start}-{end}", **headers}
-                        async with session.get(url, headers=range_header) as r:
-                            if r.status in [200, 206]:
-                                data = await r.read()
-                                async with aiofiles.open(f"{file_path}.part{idx}", "wb") as f:
-                                    await f.write(data)
-                                return True
-                    except:
-                        await asyncio.sleep(1)
-                return False
-            for i in range(max_chunks):
-                start = i * chunk_size
-                end = min(start + chunk_size - 1, total_size - 1)
-                tasks.append(download_chunk(start, end, i))
-            results = await asyncio.gather(*tasks)
-            if not all(results):
-                return None
-            async with aiofiles.open(file_path, "wb") as out_f:
-                for i in range(max_chunks):
-                    async with aiofiles.open(f"{file_path}.part{i}", "rb") as part_f:
-                        await out_f.write(await part_f.read())
-                    os.remove(f"{file_path}.part{i}")
+    file_path = f"downloads/{filename}.mkv"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
+        "Referer": "https://akstechnicalclasses.classx.co.in/",
+        "Origin": "https://akstechnicalclasses.classx.co.in"
+    }
+
+    # Check if server supports Range requests
+    r = requests.head(url, headers=headers, allow_redirects=True)
+    if r.status_code != 200:
+        print(f"❌ Server returned {r.status_code}")
+        return None
+    total_size = int(r.headers.get("content-length", 0))
+    if total_size == 0:
+        print("❌ Could not get content length")
+        return None
+
+    # If file exists, resume
+    if os.path.exists(file_path):
+        existing_size = os.path.getsize(file_path)
+        if existing_size >= total_size:
+            print("✅ File already downloaded")
             return file_path
-        except Exception as e:
-            print(f"Fast download error: {e}")
+    else:
+        existing_size = 0
+
+    # Split ranges for threads
+    ranges = []
+    part_size = math.ceil((total_size - existing_size) / threads)
+    for i in range(threads):
+        start = existing_size + i * part_size
+        end = min(start + part_size - 1, total_size - 1)
+        if start <= end:
+            ranges.append((start, end))
+
+    def download_range(start_end):
+        start, end = start_end
+        hdrs = headers.copy()
+        hdrs["Range"] = f"bytes={start}-{end}"
+        try:
+            r = requests.get(url, headers=hdrs, stream=True, timeout=(10, 180))
+            if r.status_code not in (200, 206):
+                return None
+            data = r.content
+            with open(file_path, "r+b" if os.path.exists(file_path) else "wb") as f:
+                f.seek(start)
+                f.write(data)
+            return len(data)
+        except:
             return None
+
+    # Make file with total size first
+    if not os.path.exists(file_path):
+        with open(file_path, "wb") as f:
+            f.truncate(total_size)
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        results = list(tqdm(executor.map(download_range, ranges),
+                            total=len(ranges),
+                            desc=filename,
+                            ncols=80))
+
+    if sum([r or 0 for r in results]) >= total_size - existing_size:
+        print("✅ Download complete:", file_path)
+        return file_path
+    else:
+        print("⚠️ Download incomplete")
+        return file_path if os.path.exists(file_path) else None
 
 # ==============================
 # DOWNLOAD + DECRYPT WRAPPER
@@ -349,95 +494,64 @@ from base64 import b64decode
 
 
 
-import os
-import asyncio
-from pathlib import Path
 
 async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
-    """
-    Fast download + decrypt + merge exactly as original logic,
-    but using aria2c for max speed and ensuring final video is playable.
-    """
-
-    output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
-
     try:
-        # ------------------------------
-        # 1) Download video + audio fast
-        # ------------------------------
-        cmd_download = (
-            f'yt-dlp -f "bv[height<={quality}]+ba/b" '
-            f'-o "{output_path}/file.%(ext)s" '
-            f'--allow-unplayable-format --no-check-certificate '
-            f'--external-downloader aria2c '
-            f'--downloader-args "aria2c:-x 16 -j 32 -s 16 -k 1M" '
-            f'"{mpd_url}"'
-        )
-        print(f"▶️ Downloading at 15x speed: {cmd_download}")
-        os.system(cmd_download)
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-        # ------------------------------
-        # 2) List downloaded files
-        # ------------------------------
-        av_files = list(output_path.iterdir())
-        print(f"📄 Downloaded files: {av_files}")
+        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
+        print(f"Running command: {cmd1}")
+        os.system(cmd1)
+        
+        avDir = list(output_path.iterdir())
+        print(f"Downloaded files: {avDir}")
+        print("Decrypting")
 
         video_decrypted = False
         audio_decrypted = False
 
-        # ------------------------------
-        # 3) Decrypt video and audio
-        # ------------------------------
-        for f in av_files:
-            if f.suffix.lower() in [".mp4", ".mkv"] and not video_decrypted:
-                cmd_video = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/video.mp4"'
-                print(f"🔓 Decrypting video: {cmd_video}")
-                os.system(cmd_video)
+        for data in avDir:
+            if data.suffix == ".mp4" and not video_decrypted:
+                cmd2 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/video.mp4"'
+                print(f"Running command: {cmd2}")
+                os.system(cmd2)
                 if (output_path / "video.mp4").exists():
                     video_decrypted = True
-                f.unlink()
-            elif f.suffix.lower() == ".m4a" and not audio_decrypted:
-                cmd_audio = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/audio.m4a"'
-                print(f"🔓 Decrypting audio: {cmd_audio}")
-                os.system(cmd_audio)
+                data.unlink()
+            elif data.suffix == ".m4a" and not audio_decrypted:
+                cmd3 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/audio.m4a"'
+                print(f"Running command: {cmd3}")
+                os.system(cmd3)
                 if (output_path / "audio.m4a").exists():
                     audio_decrypted = True
-                f.unlink()
+                data.unlink()
 
         if not video_decrypted or not audio_decrypted:
-            raise FileNotFoundError("❌ Decryption failed: video or audio missing.")
+            raise FileNotFoundError("Decryption failed: video or audio file not found.")
 
-        # ------------------------------
-        # 4) Merge video + audio
-        # ------------------------------
-        merged_file = output_path / f"{output_name}.mp4"
-        cmd_merge = f'ffmpeg -y -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy -movflags +faststart "{merged_file}"'
-        print(f"🎬 Merging video + audio: {cmd_merge}")
-        os.system(cmd_merge)
-
-        # Cleanup decrypted temp files
+        cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy "{output_path}/{output_name}.mp4"'
+        print(f"Running command: {cmd4}")
+        os.system(cmd4)
         if (output_path / "video.mp4").exists():
             (output_path / "video.mp4").unlink()
         if (output_path / "audio.m4a").exists():
             (output_path / "audio.m4a").unlink()
+        
+        filename = output_path / f"{output_name}.mp4"
 
-        if not merged_file.exists():
-            raise FileNotFoundError("❌ Merged video not created")
+        if not filename.exists():
+            raise FileNotFoundError("Merged video file not found.")
 
-        # ------------------------------
-        # 5) Duration info
-        # ------------------------------
-        cmd_duration = f'ffmpeg -i "{merged_file}" 2>&1 | grep "Duration"'
-        duration_info = os.popen(cmd_duration).read()
-        print(f"✅ Video ready: {merged_file} | {duration_info.strip()}")
+        cmd5 = f'ffmpeg -i "{filename}" 2>&1 | grep "Duration"'
+        duration_info = os.popen(cmd5).read()
+        print(f"Duration info: {duration_info}")
 
-        return str(merged_file)
+        return str(filename)
 
     except Exception as e:
-        print(f"❌ Error in decrypt_and_merge_video: {e}")
-        return None
-
+        print(f"Error during decryption and merging: {str(e)}")
+        raise
 
 async def run(cmd):
     proc = await asyncio.create_subprocess_shell(
@@ -483,7 +597,7 @@ def time_name():
     return f"{date} {current_time}.mp4"
 
 
-'''async def fast_download(url, name):
+async def fast_download(url, name):
     """Fast direct download implementation without yt-dlp"""
     max_retries = 5
     retry_count = 0
@@ -556,321 +670,92 @@ def time_name():
             retry_count += 1
             await asyncio.sleep(3)
     
-    return None'''
+    return None
     
-'''def process_zip_to_video(url: str, name: str) -> str:
-    import os, re, zipfile, tempfile, shutil, subprocess, requests
-    from Crypto.Cipher import AES
-    from urllib.parse import urljoin, urlparse
 
-    REFERER = "https://player.akamai.net.in/"
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": REFERER
-    }
-
-    tmp = tempfile.mkdtemp(prefix="zip_")
-    zip_path = os.path.join(tmp, "video.zip")
-    extract_dir = os.path.join(tmp, "extract")
-    decrypt_dir = os.path.join(tmp, "decrypt")
-
-    os.makedirs(extract_dir)
-    os.makedirs(decrypt_dir)
-
-    safe_name = re.sub(r'[^A-Za-z0-9_-]', '_', name)
-    out_mp4 = os.path.join(tmp, safe_name + ".mp4")
-
-    try:
-        # ==========================================================
-        # 1) FAST ZIP DOWNLOAD WITH PROGRESS
-        # ==========================================================
-        print("⬇️ Downloading ZIP...")
-        r = requests.get(url, headers=HEADERS, stream=True, timeout=60)
-        r.raise_for_status()
-
-        total = int(r.headers.get("content-length", 0))
-        done = 0
-
-        with open(zip_path, "wb") as f:
-            for chunk in r.iter_content(1024 * 1024 * 4):  # 4MB chunk
-                if chunk:
-                    f.write(chunk)
-                    done += len(chunk)
-                    if total:
-                        percent = done * 100 // total
-                        print(f"⬇️ {done/1024/1024:.2f} MB / {total/1024/1024:.2f} MB ({percent}%)")
-
-        print("✅ ZIP downloaded successfully")
-
-        # ==========================================================
-        # 2) EXTRACT ZIP
-        # ==========================================================
-        print("📦 Extracting ZIP...")
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(extract_dir)
-        print("✅ Extract complete")
-
-        # ==========================================================
-        # 3) FIND M3U8
-        # ==========================================================
-        print("🔍 Searching m3u8...")
-        m3u8 = None
-        for f in os.listdir(extract_dir):
-            if f.endswith(".m3u8"):
-                m3u8 = os.path.join(extract_dir, f)
-                break
-        if not m3u8:
-            raise RuntimeError("❌ m3u8 not found")
-
-        print(f"✅ m3u8 found: {os.path.basename(m3u8)}")
-        lines = open(m3u8, encoding="utf-8", errors="ignore").read().splitlines()
-
-        # ==========================================================
-        # 4) PARSE KEY URI + IV
-        # ==========================================================
-        print("🔑 Parsing KEY & IV...")
-        key_uri, iv = None, None
-
-        for l in lines:
-            if l.startswith("#EXT-X-KEY"):
-                key_uri = re.search(r'URI="([^"]+)"', l).group(1)
-                iv_hex = re.search(r'IV=0x([0-9A-Fa-f]+)', l)
-                if iv_hex:
-                    iv = bytes.fromhex(iv_hex.group(1))
-                break
-
-        if not key_uri:
-            raise RuntimeError("❌ Key URI not found")
-
-        print(f"✅ Key URI: {key_uri}")
-
-        # ==========================================================
-        # 5) RESOLVE KEY (LOCAL → RELATIVE → ABSOLUTE)
-        # ==========================================================
-        print("⬇️ Loading key...")
-        key = None
-
-        # (a) local key inside ZIP
-        local_key = os.path.join(extract_dir, key_uri)
-        if os.path.exists(local_key):
-            key = open(local_key, "rb").read()
-            print("🔑 Key found locally")
-
-        # (b) relative to ZIP base
-        if key is None:
-            base = url.rsplit("/", 1)[0] + "/"
-            try_url = urljoin(base, key_uri)
-            print(f"🌐 Trying key URL: {try_url}")
-            r = requests.get(try_url, headers=HEADERS, timeout=15)
-            if r.ok:
-                key = r.content
-
-        # (c) absolute URI
-        if key is None and key_uri.startswith("http"):
-            r = requests.get(key_uri, headers=HEADERS, timeout=15)
-            if r.ok:
-                key = r.content
-
-        if key is None:
-            raise RuntimeError("❌ Key not found (all methods failed)")
-
-        print("✅ Key loaded")
-
-        # ==========================================================
-        # 6) COLLECT TS SEGMENTS
-        # ==========================================================
-        segments = []
-        for f in os.listdir(extract_dir):
-            if f.lower().endswith((".ts", ".tsb", ".tse")):
-                m = re.search(r'(\d+)', f)
-                if m:
-                    segments.append((int(m.group(1)), f))
-
-        segments.sort(key=lambda x: x[0])
-        print(f"📄 Total segments: {len(segments)}")
-
-        # ==========================================================
-        # 7) DECRYPT (🔥 CORRECT LOGIC – NO PADDING ERROR)
-        # ==========================================================
-        print("🔓 Decrypting segments...")
-        total_seg = len(segments)
-
-        for i, (_, f) in enumerate(segments):
-            cipher = AES.new(key, AES.MODE_CBC, iv)  # 🔥 NEW cipher every segment
-            enc = open(os.path.join(extract_dir, f), "rb").read()
-            dec = cipher.decrypt(enc)
-
-            # 🔥 remove PKCS7 padding ONLY for last segment
-            if i == total_seg - 1:
-                pad = dec[-1]
-                if 1 <= pad <= 16:
-                    dec = dec[:-pad]
-
-            open(os.path.join(decrypt_dir, f"{i}.ts"), "wb").write(dec)
-
-            if i % 20 == 0 or i == total_seg - 1:
-                print(f"🔓 Decrypted {i+1}/{total_seg}")
-
-        # ==========================================================
-        # 8) CONCAT LIST
-        # ==========================================================
-        with open(os.path.join(decrypt_dir, "list.txt"), "w") as f:
-            for i in range(total_seg):
-                f.write(f"file '{i}.ts'\n")
-
-        # ==========================================================
-        # 9) MERGE USING FFMPEG
-        # ==========================================================
-        print("🎬 Creating final MP4...")
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", "list.txt",
-            "-c", "copy",
-            out_mp4
-        ], cwd=decrypt_dir, check=True)
-
-        shutil.move(out_mp4, os.getcwd())
-        print("✅ Video created successfully")
-
-        return safe_name + ".mp4"
-
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)'''
-import asyncio
-import subprocess
-import logging
-import os
-
-
-
-import requests
-import logging
-import requests
-import logging
-
-import requests
-import logging
-import time
-
-import yt_dlp
-import requests
-import logging
-import subprocess
-import asyncio
-import os
-
-import yt_dlp
-import logging
-
-
-import requests
-import logging
-
-import asyncio
-import os
-
-
-import asyncio
-import aiohttp
-import subprocess
-import os
-import logging
-from urllib.parse import urljoin
-
-import os
-import aiohttp
-import asyncio
 
 async def download_video(url, cmd, name):
     """
     Async download handler with retries and special cases.
-    ✅ 15x fast download
-    ✅ Works for m3u8, zip, GoogleVideo/YouTube, direct URLs
     """
     # Special cases first
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling transcoded m3u8 stream")
-        return await download_appx_m3u8(url, name)  # existing function
+        return download_appx_m3u8(url, name)
+async def download_video(url, cmd, name):
+    """
+    Ultra-fast download handler with retries and special cases.
+    """
+    # --- Special cases ---
+    if "transcoded" in url and ".m3u8" in url:
+        print("⚡ Handling transcoded m3u8 stream")
+        return download_appx_m3u8(url, name)
+    
+    
 
-    if "appx" in url and ".zip" in url:
-        print("⚡ Handling appx zip archive")
-        return process_zip_to_video(url, name)
-
-    if any(x in url for x in ["googlevideo.com", "youtube.com", "youtu.be", "embed"]):
-        print("⚡ Handling YouTube/GoogleVideo link")
-        return await download_from_player(url, name)  # existing ffmpeg based function
-
-    # Normal direct URL download (aiohttp 15x)
+    # --- Normal case with retries ---
     retry_count = 0
-    max_retries = 3
-
+    max_retries = 3  # Increased retries
     while retry_count < max_retries:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=360),
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    ssl=False
-                ) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"HTTP {resp.status}")
+        # Add aria2c optimized for ultra-fast
+        download_cmd = (
+            f'{cmd} -R 25 --fragment-retries 25 '
+            f'--external-downloader aria2c '
+            f'--downloader-args "aria2c: -x 16 -j 32 -s 32 -k 1M"'
+        )
+        print(f"▶️ Running command: {download_cmd}")
+        import logging
+        logging.info(download_cmd)
 
-                    total = int(resp.headers.get("Content-Length", 0))
-                    chunk_size = 1024 * 1024 * 10  # 10MB per chunk
-                    downloaded = 0
-                    temp_file = f"{name}.tmp"
+        k = subprocess.run(download_cmd, shell=True)
+        if k.returncode == 0:
+            print("✅ Download succeeded")
+            break
 
-                    with open(temp_file, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(chunk_size):
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if total:
-                                print(f"⬇️ {downloaded/1024/1024:.2f}/{total/1024/1024:.2f} MB "
-                                      f"({downloaded*100/total:.1f}%)")
+        retry_count += 1
+        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 3s...")
+        await asyncio.sleep(3)
 
-                    os.rename(temp_file, name)
-                    print(f"✅ Download complete: {name}")
-                    break  # success
-
-        except Exception as e:
-            retry_count += 1
-            print(f"⚠️ Download attempt {retry_count}/{max_retries} failed: {e}, retrying in 3s...")
-            await asyncio.sleep(3)
-    else:
-        print("❌ All retries failed")
-        return None
-
-    # Final check for file
-    base = name.rsplit(".", 1)[0]
-    for ext in ["", ".mkv", ".mp4", ".webm"]:
-        candidate = f"{base}{ext}" if ext else name
-        if os.path.isfile(candidate):
-            return candidate
-
-    return None
+    # --- Check output files ---
+    try:
+        if os.path.isfile(name):
+            return name
+        base = os.path.splitext(name)[0]
+        for ext in [".webm", ".mkv", ".mp4", ".mp4.webm"]:
+            fcheck = base + ext
+            if os.path.isfile(fcheck):
+                return fcheck
+        return base + ".mp4"
+    except Exception as exc:
+        logging.error(f"Error checking file: {exc}")
+        return name
 
 
 async def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
     file_path = None
+
+    # Handle special links first
     if ".m3u8" in url and "appx" in url:
         file_path = download_appx_m3u8(url, name)
     elif "appx" in url and ".zip" in url:
         from zip_handler import process_zip_to_video
         file_path = process_zip_to_video(url, name)
     else:
-        file_path = await download_raw_file_fast(url, f"{name}.mp4")
+        # Fast raw download
+        file_path = await download_raw_file_fast(url, f"{name}")
+
     if not file_path or not os.path.exists(file_path):
         print("❌ Download failed")
         return None
+
+    # Decrypt
     decrypt_file_fixed(file_path, key)
-    repair_mp4(file_path)
+
+    # Repair only if it's .mp4
+    if file_path.endswith(".mp4"):
+        repair_mp4(file_path)
+
     return file_path
-
-
 
 import os
 import time
