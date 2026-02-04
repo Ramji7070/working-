@@ -30,14 +30,12 @@ import requests
 
 def create_session():
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(
-        pool_connections=10,
-        pool_maxsize=10,
-        max_retries=3
-    )
+    adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+
 import os
 import requests
 import zipfile
@@ -62,10 +60,6 @@ import os
 import subprocess
 
 def download_appx_m3u8(url: str, name: str) -> str | None:
-    """
-    Download m3u8 (APPX) using ffmpeg with max parallel requests for 15x speed.
-    Works for video + audio.
-    """
     os.makedirs("downloads", exist_ok=True)
     output = f"downloads/{name}.mp4"
 
@@ -77,10 +71,9 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
     )
 
     cmd = [
-        "ffmpeg",
+        "ffmpeg", "-protocol_whitelist", "file,http,https,tcp,tls",
+        "-allowed_extensions", "ALL",
         "-y",
-
-        # 🔥 FAST NETWORK
         "-headers", headers,
         "-http_persistent", "1",
         "-multiple_requests", "1",
@@ -88,87 +81,33 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
-
-        # 🔥 THREADS = 16 for 15x speed
         "-threads", "16",
-
-        # 🔥 INPUT
         "-i", url,
-
-        # 🔥 FIX PLAYBACK ISSUES
         "-map", "0:v:0",
         "-map", "0:a?",
         "-c:v", "copy",
         "-c:a", "aac",
         "-bsf:a", "aac_adtstoasc",
-
-        # 🔥 CRITICAL FOR MOBILE / TELEGRAM
         "-movflags", "+faststart",
-
         output
     ]
 
-    print(f"⚡ Running ffmpeg for {name} with 15x speed...")
-    process = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-
+    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if process.returncode == 0 and os.path.exists(output):
-        print("✅ APPX 15x download OK:", output)
         return output
     else:
-        print("❌ APPX ffmpeg error:\n", process.stderr.decode())
+        print("❌ ffmpeg error:\n", process.stderr.decode())
         return None
 
 
-
-
-def download_youtube(url, name, output_path="downloads"):
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-        print(f"[INFO] Created directory: {output_path}")
-
-    print(f"[INFO] Starting YouTube download for: {url}")
-
-    ydl_opts = {
-        "format": "bestvideo+bestaudio/best",   # HD quality
-        "merge_output_format": "mp4",           # final file format
-        "outtmpl": os.path.join(output_path, f"{name}.%(ext)s"),
-        "noplaylist": True,
-        "quiet": False,
-        "extractor_args": {"youtube": {"player_client": ["default"]}},  # avoid JS runtime warning
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        print("[SUCCESS] YouTube download completed.")
-        return os.path.join(output_path, f"{name}.mp4")
-    except Exception as e:
-        print(f"[ERROR] YouTube download failed: {e}")
-        return None
-
-
-
-def process_url(url):
-    if "youtube" in url:
-        print("[INFO] Detected YouTube URL.")
-        download_youtube_video(url)
-    else:
-        print("[INFO] Unsupported URL type.")
-
-
-# ==============================
 def get_duration(filename):
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries",
-         "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filename],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", filename],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
     return float(result.stdout)
+
 
 def split_large_video(file_path, max_size_mb=1900):
     size_bytes = os.path.getsize(file_path)
@@ -200,13 +139,28 @@ def split_large_video(file_path, max_size_mb=1900):
     return output_files
 
 
-def duration(filename):
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                             "format=duration", "-of",
-                             "default=noprint_wrappers=1:nokey=1", filename],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT)
-    return float(result.stdout)
+def duration(filename: str) -> float:
+    """
+    Get video duration in seconds using ffprobe.
+    Returns 0.0 if duration cannot be determined.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                filename
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=True
+        )
+        output = result.stdout.decode().strip()
+        return float(output) if output else 0.0
+    except Exception as e:
+        print(f"⚠️ ffprobe error for {filename}: {e}")
+        return 0.0
 
 
 def get_mps_and_keys(api_url):
@@ -322,9 +276,6 @@ def repair_mp4(input_file):
     subprocess.run(cmd, shell=True)
     os.replace(fixed, input_file)
 
-# ==============================
-# FILE DECRYPT FUNCTION
-# ==============================
 def decrypt_file_fixed(file_path: str, key: str) -> bool:
     if not file_path or not os.path.exists(file_path):
         return False
@@ -332,13 +283,13 @@ def decrypt_file_fixed(file_path: str, key: str) -> bool:
         return True
     key_bytes = key.encode()
     file_size = os.path.getsize(file_path)
-    decrypt_size = min(1024*2, file_size)  # 2KB header safe
+    decrypt_size = min(1024*2, file_size)
     with open(file_path, "r+b") as f:
         with mmap.mmap(f.fileno(), decrypt_size, access=mmap.ACCESS_WRITE) as mm:
             for i in range(decrypt_size):
                 mm[i] ^= key_bytes[i % len(key_bytes)]
     return True
-# ==============================
+#===============
 # RAW FILE DOWNLOAD
 # ==============================
 # FAST DOWNLOAD
@@ -348,53 +299,44 @@ async def download_raw_file_fast(url: str, filename: str) -> str | None:
     file_path = f"downloads/{filename}"
     max_chunks = 16
     headers = {"User-Agent":"Mozilla/5.0","Referer":"https://player.akamai.net.in/","Accept":"*/*","Connection":"keep-alive"}
-
-    session = aiohttp.ClientSession()
-    try:
-        async with session.head(url, headers=headers) as resp:
-            if resp.status != 200:
-                await session.close()
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.head(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                total_size = int(resp.headers.get("Content-Length", 0))
+            chunk_size = math.ceil(total_size / max_chunks)
+            tasks = []
+            async def download_chunk(start, end, idx):
+                for attempt in range(3):
+                    try:
+                        range_header = {"Range": f"bytes={start}-{end}", **headers}
+                        async with session.get(url, headers=range_header) as r:
+                            if r.status in [200, 206]:
+                                data = await r.read()
+                                async with aiofiles.open(f"{file_path}.part{idx}", "wb") as f:
+                                    await f.write(data)
+                                return True
+                    except:
+                        await asyncio.sleep(1)
+                return False
+            for i in range(max_chunks):
+                start = i * chunk_size
+                end = min(start + chunk_size - 1, total_size - 1)
+                tasks.append(download_chunk(start, end, i))
+            results = await asyncio.gather(*tasks)
+            if not all(results):
                 return None
-            total_size = int(resp.headers.get("Content-Length", 0))
-        chunk_size = math.ceil(total_size / max_chunks)
-        tasks = []
-
-        async def download_chunk(start, end, idx):
-            for attempt in range(3):
-                try:
-                    range_header = {"Range": f"bytes={start}-{end}", **headers}
-                    async with session.get(url, headers=range_header) as r:
-                        if r.status in [200, 206]:
-                            data = await r.read()
-                            async with aiofiles.open(f"{file_path}.part{idx}", "wb") as f:
-                                await f.write(data)
-                            return True
-                except:
-                    await asyncio.sleep(1)
-            return False
-
-        for i in range(max_chunks):
-            start = i * chunk_size
-            end = min(start + chunk_size - 1, total_size - 1)
-            tasks.append(download_chunk(start, end, i))
-
-        results = await asyncio.gather(*tasks)
-        if not all(results):
-            await session.close()
+            async with aiofiles.open(file_path, "wb") as out_f:
+                for i in range(max_chunks):
+                    async with aiofiles.open(f"{file_path}.part{i}", "rb") as part_f:
+                        await out_f.write(await part_f.read())
+                    os.remove(f"{file_path}.part{i}")
+            return file_path
+        except Exception as e:
+            print(f"Fast download error: {e}")
             return None
 
-        # Merge parts
-        async with aiofiles.open(file_path, "wb") as out_f:
-            for i in range(max_chunks):
-                async with aiofiles.open(f"{file_path}.part{i}", "rb") as part_f:
-                    await out_f.write(await part_f.read())
-                os.remove(f"{file_path}.part{i}")
-        await session.close()
-        return file_path
-    except Exception as e:
-        await session.close()
-        print(f"Fast download error: {e}")
-        return None
 # ==============================
 # DOWNLOAD + DECRYPT WRAPPER
 # ==============================
@@ -541,7 +483,7 @@ def time_name():
     return f"{date} {current_time}.mp4"
 
 
-async def fast_download(url, name):
+'''async def fast_download(url, name):
     """Fast direct download implementation without yt-dlp"""
     max_retries = 5
     retry_count = 0
@@ -614,9 +556,9 @@ async def fast_download(url, name):
             retry_count += 1
             await asyncio.sleep(3)
     
-    return None
+    return None'''
     
-def process_zip_to_video(url: str, name: str) -> str:
+'''def process_zip_to_video(url: str, name: str) -> str:
     import os, re, zipfile, tempfile, shutil, subprocess, requests
     from Crypto.Cipher import AES
     from urllib.parse import urljoin, urlparse
@@ -794,7 +736,7 @@ def process_zip_to_video(url: str, name: str) -> str:
         return safe_name + ".mp4"
 
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)'''
 import asyncio
 import subprocess
 import logging
@@ -828,58 +770,17 @@ import logging
 import asyncio
 import os
 
-async def download_from_player(url: str, output: str) -> str | None:
-    """
-    Download video using ffmpeg with custom headers.
-    """
-    headers = (
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/143.0.0.0 Safari/537.36\r\n"
-        f"Referer: {url}\r\n"
-        "Origin: https://www.youtube.com\r\n"
-        "Range: bytes=0-\r\n"
-        "Accept: */*\r\n"
-        "Accept-Encoding: identity;q=1, *;q=0\r\n"
-        "Accept-Language: en-GB,en-US;q=0.9,en;q=0.8\r\n"
-        "Sec-Fetch-Dest: video\r\n"
-        "Sec-Fetch-Mode: no-cors\r\n"
-        "Sec-Fetch-Site: same-origin\r\n"
-        "DNT: 1\r\n"
-    )
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-headers", headers,
-        "-i", url,
-        "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        output
-    ]
-
-    print("⚡ Running ffmpeg command:", " ".join(cmd))
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-
-    await process.wait()
-
-    if process.returncode == 0 and os.path.exists(output):
-        print("✅ Download complete:", output)
-        return output
-    else:
-        print("❌ ffmpeg failed with code:", process.returncode)
-        return None
 import asyncio
 import aiohttp
 import subprocess
 import os
 import logging
 from urllib.parse import urljoin
+
+import os
+import aiohttp
+import asyncio
 
 async def download_video(url, cmd, name):
     """
@@ -890,15 +791,15 @@ async def download_video(url, cmd, name):
     # Special cases first
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling transcoded m3u8 stream")
-        return await download_appx_m3u8(url, name)  # your existing function
+        return await download_appx_m3u8(url, name)  # existing function
 
     if "appx" in url and ".zip" in url:
         print("⚡ Handling appx zip archive")
         return process_zip_to_video(url, name)
 
-    if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
+    if any(x in url for x in ["googlevideo.com", "youtube.com", "youtu.be", "embed"]):
         print("⚡ Handling YouTube/GoogleVideo link")
-        return await download_from_player(url, name)  # your existing ffmpeg based function
+        return await download_from_player(url, name)  # existing ffmpeg based function
 
     # Normal direct URL download (aiohttp 15x)
     retry_count = 0
@@ -907,22 +808,34 @@ async def download_video(url, cmd, name):
     while retry_count < max_retries:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=360, headers={"User-Agent":"Mozilla/5.0"}, ssl=False) as resp:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=360),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    ssl=False
+                ) as resp:
                     if resp.status != 200:
                         raise Exception(f"HTTP {resp.status}")
+
                     total = int(resp.headers.get("Content-Length", 0))
                     chunk_size = 1024 * 1024 * 10  # 10MB per chunk
                     downloaded = 0
                     temp_file = f"{name}.tmp"
+
                     with open(temp_file, "wb") as f:
                         async for chunk in resp.content.iter_chunked(chunk_size):
+                            if not chunk:
+                                break
                             f.write(chunk)
                             downloaded += len(chunk)
                             if total:
-                                print(f"⬇️ {downloaded/1024/1024:.2f}/{total/1024/1024:.2f} MB ({downloaded*100/total:.1f}%)")
+                                print(f"⬇️ {downloaded/1024/1024:.2f}/{total/1024/1024:.2f} MB "
+                                      f"({downloaded*100/total:.1f}%)")
+
                     os.rename(temp_file, name)
                     print(f"✅ Download complete: {name}")
                     break  # success
+
         except Exception as e:
             retry_count += 1
             print(f"⚠️ Download attempt {retry_count}/{max_retries} failed: {e}, retrying in 3s...")
@@ -933,72 +846,70 @@ async def download_video(url, cmd, name):
 
     # Final check for file
     base = name.rsplit(".", 1)[0]
-    if os.path.isfile(name):
-        return name
-    elif os.path.isfile(f"{base}.mkv"):
-        return f"{base}.mkv"
-    elif os.path.isfile(f"{base}.mp4"):
-        return f"{base}.mp4"
-    elif os.path.isfile(f"{base}.webm"):
-        return f"{base}.webm"
-    
-    return name
+    for ext in ["", ".mkv", ".mp4", ".webm"]:
+        candidate = f"{base}{ext}" if ext else name
+        if os.path.isfile(candidate):
+            return candidate
+
+    return None
 
 
-def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
-    """
-    Download and decrypt video (mp4/mkv/both) safely.
-    No if checks on extension, everything is decrypted and repaired automatically.
-    """
+async def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
     file_path = None
-
-    # 1️⃣ APPX m3u8
     if ".m3u8" in url and "appx" in url:
-        file_path = asyncio.run(download_appx_m3u8(url, name))
-
-    # 2️⃣ APPX ZIP
+        file_path = download_appx_m3u8(url, name)
     elif "appx" in url and ".zip" in url:
-        from zip_handler import process_zip_to_video  # your existing zip->mp4 logic
+        from zip_handler import process_zip_to_video
         file_path = process_zip_to_video(url, name)
-
-    # 3️⃣ Direct download (mp4/mkv/other)
     else:
-        file_path = asyncio.run(download_raw_file_fast(url, f"{name}.mp4"))
-
+        file_path = await download_raw_file_fast(url, f"{name}.mp4")
     if not file_path or not os.path.exists(file_path):
         print("❌ Download failed")
         return None
-
-    # 🔑 Decrypt file (any extension)
     decrypt_file_fixed(file_path, key)
-
-    # ✅ Repair using ffmpeg (works for mp4/mkv)
     repair_mp4(file_path)
-
     return file_path
 
 
-async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id, watermark="{CREDIT}", topic_thread_id: int = None):
-    try:
-        temp_thumb = None  # ✅ Ensure this is always defined for later cleanup
 
+import os
+import time
+import subprocess
+from pyrogram import Client
+from pyrogram.types import Message
+
+async def send_vid(
+    bot: Client,
+    m: Message,
+    cc,
+    filename,
+    thumb,
+    name,
+    prog,
+    channel_id,
+    watermark="{CREDIT}",
+    topic_thread_id: int = None
+):
+    try:
+        temp_thumb = None
         thumbnail = thumb
+
+        # ------------------------------
+        # Thumbnail Generation + Watermark
+        # ------------------------------
         if thumb in ["/d", "no"] or not os.path.exists(thumb):
             temp_thumb = f"downloads/thumb_{os.path.basename(filename)}.jpg"
-            
-            # Generate thumbnail at 10s
             subprocess.run(
                 f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 -q:v 2 -y "{temp_thumb}"',
                 shell=True
             )
 
-            # ✅ Only apply watermark if watermark != "/d"
             if os.path.exists(temp_thumb) and (watermark and watermark.strip() != "/d"):
                 text_to_draw = watermark.strip()
                 try:
-                    # Probe image width for better scaling
                     probe_out = subprocess.check_output(
-                        f'ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0:s=x "{temp_thumb}"',
+                        f'ffprobe -v error -select_streams v:0 -show_entries stream=width '
+                        f'-of csv=p=0:s=x "{temp_thumb}"',
                         shell=True,
                         stderr=subprocess.DEVNULL,
                     ).decode().strip()
@@ -1006,7 +917,6 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                 except Exception:
                     img_width = 1280
 
-                # Base size relative to width, then adjust by text length
                 base_size = max(28, int(img_width * 0.075))
                 text_len = len(text_to_draw)
                 if text_len <= 3:
@@ -1018,10 +928,7 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                 else:
                     font_size = int(base_size * 0.7)
                 font_size = max(32, min(font_size, 120))
-
                 box_h = max(60, int(font_size * 1.6))
-
-                # Simple escaping for single quotes in text
                 safe_text = text_to_draw.replace("'", "\\'")
 
                 text_cmd = (
@@ -1032,11 +939,13 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     f'-c:v mjpeg -q:v 2 -y "{temp_thumb}"'
                 )
                 subprocess.run(text_cmd, shell=True)
-            
+
             thumbnail = temp_thumb if os.path.exists(temp_thumb) else None
 
-        await prog.delete(True)  # ⏳ Remove previous progress message
-
+        # ------------------------------
+        # Progress Messages
+        # ------------------------------
+        await prog.delete(True)
         reply1 = await bot.send_message(channel_id, f" **Uploading Video:**\n<blockquote>{name}</blockquote>")
         reply = await m.reply_text(f"🖼 **Generating Thumbnail:**\n<blockquote>{name}</blockquote>")
 
@@ -1044,11 +953,12 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
         notify_split = None
         sent_message = None
 
+        # ------------------------------
+        # Case A: File < 2GB
+        # ------------------------------
         if file_size_mb < 2000:
-            # 📹 Upload as single video
             dur = int(duration(filename))
             start_time = time.time()
-
             try:
                 sent_message = await bot.send_video(
                     chat_id=channel_id,
@@ -1071,21 +981,21 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     progress_args=(reply, start_time)
                 )
 
-            # ✅ Cleanup
             if os.path.exists(filename):
                 os.remove(filename)
             await reply.delete(True)
             await reply1.delete(True)
 
+        # ------------------------------
+        # Case B: File ≥ 2GB → Split
+        # ------------------------------
         else:
-            # ⚠️ Notify about splitting
             notify_split = await m.reply_text(
                 f"⚠️ The video is larger than 2GB ({human_readable_size(os.path.getsize(filename))})\n"
                 f"⏳ Splitting into parts before upload..."
             )
 
             parts = split_large_video(filename)
-
             try:
                 first_part_message = None
                 for idx, part in enumerate(parts):
@@ -1132,11 +1042,9 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
             except Exception as e:
                 raise Exception(f"Upload failed at part {idx + 1}: {str(e)}")
 
-            # ✅ Final messages
             if len(parts) > 1:
                 await m.reply_text("✅ Large video successfully uploaded in multiple parts!")
 
-            # Cleanup after split
             await reply.delete(True)
             await reply1.delete(True)
             if notify_split:
@@ -1144,10 +1052,11 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
             if os.path.exists(filename):
                 os.remove(filename)
 
-            # Return first sent part message
             sent_message = first_part_message
 
-        # 🧹 Cleanup generated thumbnail if applicable
+        # ------------------------------
+        # Cleanup Thumbnail
+        # ------------------------------
         if thumb in ["/d", "no"] and temp_thumb and os.path.exists(temp_thumb):
             os.remove(temp_thumb)
 
