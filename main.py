@@ -1,4 +1,4 @@
-# 🔧 Standard Library
+c# 🔧 Standard Library
 import os
 import re
 import sys
@@ -78,6 +78,63 @@ from urllib.parse import unquote, urlparse
 from pyrogram.errors import FloodWait
 height = 1080
 width = 1920
+
+
+import os
+import aiohttp
+import aiofiles
+import asyncio
+import mimetypes
+
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+UTKASH_PROXY = os.environ.get("UTKASH_PROXY")  # http://user:pass@ip:port
+
+async def download_pdf_with_proxy(url: str, filename: str):
+    try:
+        if not filename.lower().endswith(".pdf"):
+            filename += ".pdf"
+
+        file_path = os.path.join(DOWNLOAD_DIR, filename)
+
+        timeout = aiohttp.ClientTimeout(total=120)
+
+        connector = aiohttp.TCPConnector(ssl=False)
+
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector
+        ) as session:
+
+            async with session.get(
+                url,
+                proxy=UTKASH_PROXY,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/pdf"
+                }
+            ) as resp:
+
+                if resp.status != 200:
+                    raise Exception(f"HTTP ERROR {resp.status}")
+
+                content_type = resp.headers.get("Content-Type", "")
+                if "pdf" not in content_type.lower():
+                    raise Exception("Not a valid PDF file")
+
+                temp_path = file_path + ".part"
+
+                async with aiofiles.open(temp_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1024 * 512):
+                        await f.write(chunk)
+
+                os.rename(temp_path, file_path)
+                return file_path
+
+    except Exception as e:
+        print(f"PDF Download Error: {e}")
+        return None
 
 
 # PDF Download function
@@ -1049,14 +1106,14 @@ async def txt_handler(bot: Client, m: Message):
             else:
                 ytf = f"b[height<={raw_text2}]/bv[height<={raw_text2}]+ba/b/bv+ba"
                 
-            if "jw-prod" in url:
+            if "jay" in url:
                 url = url.replace("https://apps-s3-jw-prod.utkarshapp.com/admin_v1/file_library/videos","https://d1q5ugnejk3zoi.cloudfront.net/ut-production-jw/admin_v1/file_library/videos")
                 cmd = f'yt-dlp -o "{name}.mp4" "{url}"'
             elif "webvideos.classplusapp." in url:
-               cmd = f'yt-dlp --add-header "referer:https://web.classplusapp.com/" --add-header "x-cdn-tag:empty" -f "{ytf}" "{url}" -o "{name}.mp4"'
+                cmd = f'yt-dlp --add-header "referer:https://web.classplusapp.com/" --add-header "x-cdn-tag:empty" -f "{ytf}" "{url}" -o "{name}.mp4"'
             
             else:
-                cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
+                 cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
 
             try:
                 cc = (
@@ -1194,6 +1251,8 @@ async def txt_handler(bot: Client, m: Message):
                         await m.reply_text(str(e))
                         time.sleep(e.x)
                         continue
+                
+
                 elif "https://apps-s3-prod.utkarshapp.com/admin_v1/file_manager/pdf" in url:
                     try:
                         print(f"⚠️ Utkarsh PDF - sending with thumbnail and buttons")
