@@ -1,11 +1,15 @@
-# pyrogram==2.0.106
+# Telegram / Pyrogram stack
 pyrofork==2.2.11
 tgcrypto==1.2.5
 pyromod==1.5.0
 pysocks==1.7.1
-asyncio
+
+# Utils
 tqdm==4.66.1
-# HTTP & scraping
+colorama
+pytz
+
+# HTTP & Scraping
 requests==2.31.0
 cloudscraper
 aiohttp
@@ -16,10 +20,14 @@ beautifulsoup4
 certifi==2025.7.14
 charset-normalizer==3.3.2
 idna==3.6
+wget==3.2
+
+# Flask Web Server
 flask
 gunicorn
-requests
 python-dotenv
+itsdangerous
+
 # Crypto & Security
 pycryptodome==3.18.0
 pyaes==1.6.1
@@ -31,26 +39,16 @@ PyJWT==2.8.0
 yt-dlp==2025.06.30
 mutagen==1.46.0
 ffmpeg-python==0.2.0
-pillow==10.3.0
+pillow==10.2.0
 m3u8==6.0.0
 pytube==15.0.0
-wget==3.2
 
-# Database & Caching
+# Database
 motor
 pymongo
 umongo
 sqlalchemy
 async-lru==2.0.2
-certifi
 
-# Flask App (optional if using webhook/server)
-Flask
-gunicorn
-itsdangerous
-
-
-# Others
-pytz
-colorama
+# PDF / Reports
 reportlab
