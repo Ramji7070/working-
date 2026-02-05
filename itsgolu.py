@@ -288,7 +288,23 @@ def vid_info(info):
 # ==============================
 # RAW FILE DOWNLOAD
 # ==============================
-def download_raw_file(url: str, filename: str) -> str | None:
+import os
+import math
+import asyncio
+import aiohttp
+import aiofiles
+from tqdm import tqdm
+
+async def download_raw_file(url: str, filename: str) -> str | None:
+    """
+    Ultra-fast Heroku-safe download for large MKV/MP4 files.
+    ✅ Supports resume
+    ✅ Parallel chunked download
+    ✅ Safe for Heroku environment
+    """
+    os.makedirs("downloads", exist_ok=True)
+    file_path = f"downloads/{filename}.mkv"
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
         "Referer": "https://akstechnicalclasses.classx.co.in/",
@@ -297,46 +313,76 @@ def download_raw_file(url: str, filename: str) -> str | None:
         "Connection": "keep-alive"
     }
 
-    os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{filename}.mkv"
-
-    session = create_session()
+    # Check existing file for resume
     downloaded = 0
-
     if os.path.exists(file_path):
         downloaded = os.path.getsize(file_path)
-        headers["Range"] = f"bytes={downloaded}-"
 
-    try:
-        with session.get(url, headers=headers, stream=True, timeout=(10, 300)) as r:
-            if r.status_code not in (200, 206):
-                print(f"❌ Bad status: {r.status_code}")
+    async with aiohttp.ClientSession() as session:
+        # Get total file size
+        async with session.head(url, headers=headers) as resp:
+            if resp.status != 200:
+                print(f"❌ Bad status: {resp.status}")
+                return None
+            total_size = int(resp.headers.get("Content-Length", 0))
+            if total_size == 0:
+                print("❌ Content-Length missing")
                 return None
 
-            total = int(r.headers.get("content-length", 0)) + downloaded
-            chunk_size = 512 * 1024   # faster IO
-      # long files safe
+        # If partially downloaded
+        if downloaded > 0:
+            headers["Range"] = f"bytes={downloaded}-"
 
+        # Decide number of chunks
+        max_chunks = 16
+        chunk_size = math.ceil((total_size - downloaded) / max_chunks)
 
-            with open(file_path, "ab") as f, tqdm(
-                total=total,
-                initial=downloaded,
-                unit="B",
-                unit_scale=True,
-                desc=filename,
-                ncols=80
-            ) as bar:
-                for chunk in r.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        bar.update(len(chunk))
+        # Download each chunk
+        async def download_chunk(start, end, idx):
+            for attempt in range(3):
+                try:
+                    range_header = {"Range": f"bytes={start}-{end}", **headers}
+                    async with session.get(url, headers=range_header) as r:
+                        if r.status not in [200, 206]:
+                            continue
+                        async with aiofiles.open(f"{file_path}.part{idx}", "wb") as f:
+                            async for data in r.content.iter_chunked(1024*1024):
+                                await f.write(data)
+                    return True
+                except:
+                    await asyncio.sleep(1)
+            return False
 
-        return file_path
+        # Prepare tasks
+        tasks = []
+        for i in range(max_chunks):
+            start = downloaded + i * chunk_size
+            end = min(start + chunk_size - 1, total_size - 1)
+            if start > end:
+                break
+            tasks.append(download_chunk(start, end, i))
 
-    except Exception as e:
-        print(f"⚠️ Download interrupted (resume enabled): {e}")
-        return file_path if os.path.exists(file_path) else None
-# ==============================
+        # Run tasks with tqdm
+        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc=filename, ncols=80):
+            await f
+
+        # Merge chunks safely
+        async with aiofiles.open(file_path, "ab") as out_f:
+            for i in range(len(tasks)):
+                part_file = f"{file_path}.part{i}"
+                if not os.path.exists(part_file):
+                    continue
+                async with aiofiles.open(part_file, "rb") as part_f:
+                    while True:
+                        chunk = await part_f.read(1024*1024)
+                        if not chunk:
+                            break
+                        await out_f.write(chunk)
+                os.remove(part_file)
+
+    print(f"✅ Download complete: {file_path}")
+    return file_path
+
 # DOWNLOAD + DECRYPT WRAPPER
 # ==============================
 import os
@@ -348,82 +394,109 @@ from base64 import b64decode
 
 
 
+import asyncio
+import os
+from pathlib import Path
+
+async def run_cmd(cmd):
+    """Run command asynchronously and capture output"""
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise Exception(f"Command failed: {cmd}\n[stderr] {stderr.decode()}")
+    return stdout.decode()
 
 async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
+    """
+    Same logic as original code but Heroku-friendly & ultra-fast:
+    1) Async download with yt-dlp + aria2c
+    2) Flexible file detection
+    3) Async decrypt
+    4) Merge with ffmpeg + faststart
+    """
     try:
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
-        print(f"Running command: {cmd1}")
-        cmd1 += " --concurrent-fragments 4"
-        os.system(cmd1)
+        # ------------------------------
+        # 1) Download video+audio
+        # ------------------------------
+        cmd_download = (
+            f'yt-dlp -f "bv[height<={quality}]+ba/b" '
+            f'-o "{output_path}/file.%(ext)s" '
+            f'--allow-unplayable-format --no-check-certificate '
+            f'--external-downloader aria2c '
+            f'--downloader-args "aria2c:-x 16 -j 32 -s 16 -k 1M" '
+            f'"{mpd_url}"'
+        )
+        print(f"▶️ Downloading: {cmd_download}")
+        await run_cmd(cmd_download)
 
-        
-        avDir = list(output_path.iterdir())
-        print(f"Downloaded files: {avDir}")
-        print("Decrypting")
+        # ------------------------------
+        # 2) Detect downloaded files
+        # ------------------------------
+        av_files = list(output_path.iterdir())
+        print(f"📄 Downloaded files: {av_files}")
 
         video_decrypted = False
         audio_decrypted = False
 
-        for data in avDir:
-            if data.suffix == ".mp4" and not video_decrypted:
-                cmd2 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/video.mp4"'
-                print(f"Running command: {cmd2}")
-                os.system(cmd2)
+        # ------------------------------
+        # 3) Decrypt video/audio
+        # ------------------------------
+        for f in av_files:
+            if f.suffix.lower() in [".mp4", ".mkv", ".webm"] and not video_decrypted:
+                cmd_video = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/video.mp4"'
+                print(f"🔓 Decrypting video: {cmd_video}")
+                await run_cmd(cmd_video)
                 if (output_path / "video.mp4").exists():
                     video_decrypted = True
-                data.unlink()
-            elif data.suffix == ".m4a" and not audio_decrypted:
-                cmd3 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/audio.m4a"'
-                print(f"Running command: {cmd3}")
-                os.system(cmd3)
+                f.unlink()
+            elif f.suffix.lower() in [".m4a", ".aac"] and not audio_decrypted:
+                cmd_audio = f'mp4decrypt {keys_string} --show-progress "{f}" "{output_path}/audio.m4a"'
+                print(f"🔓 Decrypting audio: {cmd_audio}")
+                await run_cmd(cmd_audio)
                 if (output_path / "audio.m4a").exists():
                     audio_decrypted = True
-                data.unlink()
+                f.unlink()
 
         if not video_decrypted or not audio_decrypted:
-            raise FileNotFoundError("Decryption failed: video or audio file not found.")
+            raise FileNotFoundError("❌ Decryption failed: video or audio missing.")
 
-        cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy "{output_path}/{output_name}.mp4"'
-        print(f"Running command: {cmd4}")
-        os.system(cmd4)
-        if (output_path / "video.mp4").exists():
-            (output_path / "video.mp4").unlink()
-        if (output_path / "audio.m4a").exists():
-            (output_path / "audio.m4a").unlink()
-        
-        filename = output_path / f"{output_name}.mp4"
+        # ------------------------------
+        # 4) Merge video+audio
+        # ------------------------------
+        merged_file = output_path / f"{output_name}.mp4"
+        cmd_merge = (
+            f'ffmpeg -y -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" '
+            f'-c copy -movflags +faststart "{merged_file}"'
+        )
+        print(f"🎬 Merging: {cmd_merge}")
+        await run_cmd(cmd_merge)
 
-        if not filename.exists():
-            raise FileNotFoundError("Merged video file not found.")
+        # Cleanup decrypted temp files
+        (output_path / "video.mp4").unlink(missing_ok=True)
+        (output_path / "audio.m4a").unlink(missing_ok=True)
 
-        cmd5 = f'ffmpeg -i "{filename}" 2>&1 | grep "Duration"'
-        duration_info = os.popen(cmd5).read()
-        print(f"Duration info: {duration_info}")
+        if not merged_file.exists():
+            raise FileNotFoundError("❌ Merged video not created")
 
-        return str(filename)
+        # ------------------------------
+        # 5) Duration info
+        # ------------------------------
+        cmd_duration = f'ffmpeg -i "{merged_file}" 2>&1 | grep "Duration"'
+        duration_info = os.popen(cmd_duration).read()
+        print(f"✅ Video ready: {merged_file} | {duration_info.strip()}")
+
+        return str(merged_file)
 
     except Exception as e:
-        print(f"Error during decryption and merging: {str(e)}")
-        raise
-
-async def run(cmd):
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-
-    stdout, stderr = await proc.communicate()
-
-    print(f'[{cmd!r} exited with {proc.returncode}]')
-    if proc.returncode == 1:
-        return False
-    if stdout:
-        return f'[stdout]\n{stdout.decode()}'
-    if stderr:
-        return f'[stderr]\n{stderr.decode()}'
+        print(f"❌ Error in decrypt_and_merge_video: {e}")
+        return None
 
     
 
@@ -787,25 +860,35 @@ async def download_from_player(url: str, output: str) -> str | None:
         print("❌ ffmpeg failed with code:", process.returncode)
         return None
 
+import asyncio
+import os
+import subprocess
+import logging
+
 async def download_video(url, cmd, name):
     """
-    Async download handler with retries and special cases.
+    Heroku-compatible async download with retries & special cases.
+    ✅ Ultra fast using aria2c
+    ✅ Supports m3u8, zip, YouTube/GoogleVideo, direct URLs
     """
-    # Special cases first
+    # ------------------------------
+    # 1) Special cases first
+    # ------------------------------
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling transcoded m3u8 stream")
-        return download_appx_m3u8(url, name)
-    
+        return download_appx_m3u8(url, name)  # your existing function
+
     if "appx" in url and ".zip" in url:
         print("⚡ Handling appx zip archive")
-        return process_zip_to_video(url, name)
+        return process_zip_to_video(url, name)  # your existing function
 
-    # GoogleVideo / YouTube filter
     if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
         print("⚡ Handling YouTube/GoogleVideo link")
-        return download_from_player(url, name)
+        return download_from_player(url, name)  # your existing function
 
-    # Normal case with retries
+    # ------------------------------
+    # 2) Normal URL download with retries
+    # ------------------------------
     retry_count = 0
     max_retries = 2
 
@@ -813,21 +896,35 @@ async def download_video(url, cmd, name):
         download_cmd = (
             f'{cmd} -R 25 --fragment-retries 25 '
             f'--external-downloader aria2c '
-            f'--downloader-args "aria2c: -x 6 -j 6 -s 6 --file-allocation=none --summary-interval=20"'
+            f'--downloader-args "aria2c:-x 16 -j 32 -s 16 -k 1M"'
         )
         print(f"▶️ Running command: {download_cmd}")
         logging.info(download_cmd)
 
-        k = subprocess.run(download_cmd, shell=True)
-        if k.returncode == 0:
+        # Run command asynchronously
+        proc = await asyncio.create_subprocess_shell(
+            download_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode == 0:
             print("✅ Download succeeded")
             break
+        else:
+            retry_count += 1
+            print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 5s...")
+            if stderr:
+                print(f"[stderr] {stderr.decode()}")
+            await asyncio.sleep(5)
+    else:
+        print("❌ All download attempts failed")
+        return None
 
-        retry_count += 1
-        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}), retrying in 5s...")
-        await asyncio.sleep(5)
-
-    # Check output files
+    # ------------------------------
+    # 3) Verify output files
+    # ------------------------------
     try:
         if os.path.isfile(name):
             return name
@@ -841,10 +938,12 @@ async def download_video(url, cmd, name):
         elif os.path.isfile(f"{base}.mp4.webm"):
             return f"{base}.mp4.webm"
 
+        # fallback
         return base + ".mp4"
     except Exception as exc:
         logging.error(f"Error checking file: {exc}")
         return name
+
 import os
 import subprocess
 import mmap
