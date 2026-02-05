@@ -615,12 +615,16 @@ import os
 import subprocess
 import logging
 
+import subprocess
+import os
+from tqdm import tqdm
+
 def download_video(url, cmd, name):
     """
     Handles all types of URLs: m3u8, zip, YouTube, direct links.
     Ultra fast using yt-dlp + aria2c.
     Works on Heroku (ephemeral filesystem).
-    Optimized for Heroku's resource constraints (lower concurrency to avoid throttling).
+    Optimized for Heroku's resource constraints.
     """
 
     # Special cases
@@ -628,56 +632,66 @@ def download_video(url, cmd, name):
         print("⚡ Handling m3u8")
         return download_appx_m3u8(url, name)
 
-    # Default: yt-dlp + aria2c (adjusted for Heroku: reduced connections to prevent resource exhaustion)
+    # Default: yt-dlp + aria2c
     retry_count = 0
     max_retries = 2
-    download_success = False
+   download_success = False
+
     while retry_count < max_retries:
         download_cmd = (
             f'{cmd} -R 25 --fragment-retries 25 '
             f'--external-downloader aria2c '
-            f'--downloader-args "aria2c: -x4 -j4 -s4 -k1M" '  # Reduced from -x16 -j32 -s16 to -x4 -j4 -s4 for Heroku compatibility
+            f'--downloader-args "aria2c: -x4 -j4 -s4 -k1M" '
             f'-o "{name}" "{url}"'
         )
         print(f"▶️ Running command: {download_cmd}")
+
         try:
-            result = subprocess.run(download_cmd, shell=True, check=True, capture_output=True, text=True)
-            print("✅ Download succeeded")
-            download_success = True
-            break
+            # Using subprocess with a progress bar
+            with subprocess.Popen(download_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+                for line in proc.stdout:
+                    print(line, end='')  # Print each line of output
+                proc.wait()
+                if proc.returncode == 0:
+                    print("✅ Download succeeded")
+                    download_success = True
+                    break
+                else:
+                    raise subprocess.CalledProcessError(proc.returncode, download_cmd)
+
         except subprocess.CalledProcessError as exc:
             retry_count += 1
             print(f"⚠️ Retry {retry_count}/{max_retries} failed: {exc}")
             if retry_count == max_retries:
                 print("❌ All retries failed. Download unsuccessful.")
-                return None  # Or raise an exception if preferred
+                return None
 
-    if not download_success:
-        return None
+    if download_success:
+        # Verify output files
+        try:
+            if os.path.isfile(name):
+                return name
+            elif os.path.isfile(f"{name}.webm"):
+                return f"{name}.webm"
 
-    # Verify output files
-    try:
-        if os.path.isfile(name):
-            return name
-        elif os.path.isfile(f"{name}.webm"):
-            return f"{name}.webm"
+            base = os.path.splitext(name)[0]
+            for ext in [".mkv", ".mp4", ".mp4.webm"]:
+                candidate = base + ext
+                if os.path.isfile(candidate):
+                    return candidate
 
-        base = os.path.splitext(name)[0]
-        for ext in [".mkv", ".mp4", ".mp4.webm"]:
-            candidate = base + ext
-            if os.path.isfile(candidate):
-                return candidate
-
-        # Fallback (ensure it exists or log error)
-        fallback = base + ".mp4"
-        if os.path.isfile(fallback):
-            return fallback
-        else:
-            logging.error(f"No valid output file found for {name}")
+            # Fallback (ensure it exists or log error)
+            fallback = base + ".mp4"
+            if os.path.isfile(fallback):
+                return fallback
+            else:
+                print(f"❌ No valid output file found for {name}")
+                return None
+        except Exception as exc:
+            print(f"Error checking file: {exc}")
             return None
-    except Exception as exc:
-        logging.error(f"Error checking file: {exc}")
-        return None
+
+    return None
 
 import os
 import subprocess
