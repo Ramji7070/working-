@@ -75,12 +75,16 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
     cmd = [
         "ffmpeg",
         "-y",
-        "-threads", "4",              # multiple threads for faster processing
+        "-threads", "2",
+        "-bufsize", "8M",
+        "-stats_period", "5",
+         "-loglevel", "error",
+              # multiple threads for faster processing
         "-headers", headers,
         "-multiple_requests", "1",    # parallel segment requests (ffmpeg ≥ 5.1)
         "-i", url,
         "-c", "copy",
-        "-bufsize", "10M",            # bigger buffer for smoother download
+                   # bigger buffer for smoother download
         "-bsf:a", "aac_adtstoasc",
         output
     ]
@@ -126,7 +130,7 @@ def download_youtube(url, name, output_path="downloads"):
 def process_url(url):
     if "youtube" in url:
         print("[INFO] Detected YouTube URL.")
-        download_youtube_video(url)
+        download_youtube(url, name=os.path.basename(url))
     else:
         print("[INFO] Unsupported URL type.")
 
@@ -141,7 +145,7 @@ def get_duration(filename):
     )
     return float(result.stdout)
 
-def split_large_video(file_path, max_size_mb=1900):
+def split_large_video(file_path, max_size_mb=1800):
     size_bytes = os.path.getsize(file_path)
     max_bytes = max_size_mb * 1024 * 1024
 
@@ -280,27 +284,7 @@ def vid_info(info):
 # ==============================
 # FILE DECRYPT FUNCTION
 # ==============================
-def decrypt_file(file_path: str, key: str) -> bool:
-    if not file_path or not os.path.exists(file_path):
-        return False
 
-    # 👇 NEW SAFETY CHECK
-    if os.path.getsize(file_path) == 0:
-        print("❌ File is empty, skipping decrypt")
-        return False
-
-    if not key:
-        return True
-
-    key_bytes = key.encode()
-    size = min(28, os.path.getsize(file_path))
-
-    with open(file_path, "r+b") as f:
-        with mmap.mmap(f.fileno(), length=size, access=mmap.ACCESS_WRITE) as mm:
-            for i in range(size):
-                mm[i] ^= key_bytes[i] if i < len(key_bytes) else i
-
-    return True
 # ==============================
 # RAW FILE DOWNLOAD
 # ==============================
@@ -324,13 +308,15 @@ def download_raw_file(url: str, filename: str) -> str | None:
         headers["Range"] = f"bytes={downloaded}-"
 
     try:
-        with session.get(url, headers=headers, stream=True, timeout=(10, 180)) as r:
+        with session.get(url, headers=headers, stream=True, timeout=(10, 300)) as r:
             if r.status_code not in (200, 206):
                 print(f"❌ Bad status: {r.status_code}")
                 return None
 
             total = int(r.headers.get("content-length", 0)) + downloaded
-            chunk_size = 256 * 1024
+            chunk_size = 512 * 1024   # faster IO
+      # long files safe
+
 
             with open(file_path, "ab") as f, tqdm(
                 total=total,
@@ -370,7 +356,9 @@ async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name
 
         cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
         print(f"Running command: {cmd1}")
+        cmd1 += " --concurrent-fragments 4"
         os.system(cmd1)
+
         
         avDir = list(output_path.iterdir())
         print(f"Downloaded files: {avDir}")
@@ -521,7 +509,7 @@ async def fast_download(url, name):
                             output_file = f"{name}.mp4"
                             with open(output_file, 'wb') as f:
                                 while True:
-                                    chunk = await response.content.read(1024*1024)  # 1MB chunks
+                                    chunk = await response.content.read(2 * 1024 * 1024)  # 1MB chunks
                                     if not chunk:
                                         break
                                     f.write(chunk)
@@ -825,7 +813,7 @@ async def download_video(url, cmd, name):
         download_cmd = (
             f'{cmd} -R 25 --fragment-retries 25 '
             f'--external-downloader aria2c '
-            f'--downloader-args "aria2c: -x 16 -j 32"'
+            f'--downloader-args "aria2c: -x 6 -j 6 -s 6 --file-allocation=none --summary-interval=20"'
         )
         print(f"▶️ Running command: {download_cmd}")
         logging.info(download_cmd)
@@ -857,56 +845,169 @@ async def download_video(url, cmd, name):
     except Exception as exc:
         logging.error(f"Error checking file: {exc}")
         return name
+import os
+import subprocess
+import mmap
+
+def decrypt_file(file_path: str, key: str) -> bool:
+    if not file_path or not os.path.exists(file_path):
+        return False
+
+    # Safety check for empty file
+    if os.path.getsize(file_path) == 0:
+        print("❌ File is empty, skipping decrypt")
+        return False
+
+    if not key:
+        return True
+
+    key_bytes = key.encode()
+    size = min(28, os.path.getsize(file_path))
+
+    with open(file_path, "r+b") as f:
+        with mmap.mmap(f.fileno(), length=size, access=mmap.ACCESS_WRITE) as mm:
+            for i in range(size):
+                mm[i] ^= key_bytes[i] if i < len(key_bytes) else i
+
+    return True
+
+def is_playable(file_path: str) -> bool:
+    try:
+        # Probe the file to check if it's playable
+        subprocess.run(
+            f'ffprobe -v error -i "{file_path}"',
+            shell=True, check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def repair_video(file_path: str) -> str:
+    # Repair the video to make it playable
+    repaired_path = file_path.replace(".mkv", "_fixed.mp4")
+    cmd = f'ffmpeg -y -i "{file_path}" -c copy "{repaired_path}"'
+    subprocess.run(cmd, shell=True)
+    return repaired_path
+
 def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
-    if "transcoded" in url and ".m3u8" in url:
-        print("⚡ Handling appx m3u8 stream")
-        return download_appx_m3u8(url, name)
-    
-
-    if "appx" in url and ".zip" in url:
-        return process_zip_to_video(url, name)
-    
-    if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
-        return download_googlevideo(url, name)
-
-
+    # Download and decrypt the video
     video_path = None
-    for _ in range(5):  # resume attempts
+    for _ in range(5):  # Retry up to 5 times
         video_path = download_raw_file(url, name)
-        if video_path and os.path.getsize(video_path) > 10 * 1024 * 1024:
+        if video_path and os.path.getsize(video_path) > 10 * 1024 * 1024:  # Ensure minimum size
             break
 
     if not video_path:
         return None
 
-    # ✅ अगर decrypt fail भी हो तो original path return करो
     try:
-        if decrypt_file(video_path, key):
-            return video_path
+        if key:
+            # Decrypt the file if key is provided
+            decrypt_file(video_path, key)
     except Exception as e:
         print(f"⚠️ Decrypt failed: {e}")
+        return None
 
-    return video_path  # fallback
+    if not is_playable(video_path):
+        # If not playable, repair the video
+        return repair_video(video_path)
+    else:
+        # If already playable, return the original path
+        return video_path
 
+
+
+
+import os
+import time
+import subprocess
+from pyrogram import Client
+from pyrogram.types import Message
+credit1 = os.environ.get(
+    "credit1",
+    '<a href="https://t.me/Jetha_lal_bot">𝄟⃝🐬🅹🅰🅸 🆂🅷🆁🅸 🆁🅰🅼 ⚡️ 𝄟⃝🐬 💻</a>'
+)
+# ====== Time formatting for ETA ======
+def _fmt_time(sec):
+    sec = int(sec)
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    elif m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+# 🔥 Global cache to throttle edits for fast upload
+_LAST_EDIT_TIME = {}
+
+# ====== Progress bar for uploads ======
+def progress_bar(current, total, reply, start_time, name="{VIDEO}", credit="{CREDIT}"):
+    if current <= 0 or total <= 0:
+        return
+
+    now = time.time()
+    key = id(reply)
+    last_edit = _LAST_EDIT_TIME.get(key, 0)
+    if now - last_edit < 1.2:  # throttle every ~1.2 sec
+        return
+    _LAST_EDIT_TIME[key] = now
+
+    diff = now - start_time
+    if diff < 1:
+        return
+
+    speed = current / diff                    # bytes/sec
+    percent = (current * 100) / total
+    eta = (total - current) / speed if speed > 0 else 0
+
+    done_mb = current / (1024 * 1024)
+    total_mb = total / (1024 * 1024)
+    speed_mb = speed / (1024 * 1024)
+
+    # Progress bar design
+    bar_len = 20
+    filled = int(bar_len * percent / 100)
+    bar = "█" * filled + "░" * (bar_len - filled)
+
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━━━━━╮\n"
+        "│ 🚀 **UPLOADING VIDEO** │\n"
+        "├━━━━━━━━━━━━━━━━━━━━━━┤\n"
+        f"│ 🎬 **{name[:40]}**\n"
+        f"│ `{bar}` **{percent:5.1f}%**\n"
+        f"│ ⬆️ **{done_mb:,.0f} / {total_mb:,.0f} MB**\n"
+        f"│ ⚡ **{speed_mb:,.2f} MB/s**\n"
+        f"│ ⏳ **{_fmt_time(eta)} left**\n"
+        "├━━━━━━━━━━━━━━━━━━━━━━┤\n"
+        f"│ 👤 **CREDIT:** `{credit1}`\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯"
+    )
+
+    try:
+        reply.edit_text(text)
+    except:
+        pass
+
+# ====== Main send_vid function ======
 async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id, watermark="{CREDIT}", topic_thread_id: int = None):
     try:
-        temp_thumb = None  # ✅ Ensure this is always defined for later cleanup
-
+        temp_thumb = None  # Ensure always defined
         thumbnail = thumb
+
+        # Thumbnail generation
         if thumb in ["/d", "no"] or not os.path.exists(thumb):
             temp_thumb = f"downloads/thumb_{os.path.basename(filename)}.jpg"
-            
-            # Generate thumbnail at 10s
             subprocess.run(
                 f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 -q:v 2 -y "{temp_thumb}"',
                 shell=True
             )
 
-            # ✅ Only apply watermark if watermark != "/d"
+            # Watermark if needed
             if os.path.exists(temp_thumb) and (watermark and watermark.strip() != "/d"):
                 text_to_draw = watermark.strip()
                 try:
-                    # Probe image width for better scaling
                     probe_out = subprocess.check_output(
                         f'ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0:s=x "{temp_thumb}"',
                         shell=True,
@@ -916,7 +1017,6 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                 except Exception:
                     img_width = 1280
 
-                # Base size relative to width, then adjust by text length
                 base_size = max(28, int(img_width * 0.075))
                 text_len = len(text_to_draw)
                 if text_len <= 3:
@@ -928,12 +1028,9 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                 else:
                     font_size = int(base_size * 0.7)
                 font_size = max(32, min(font_size, 120))
-
                 box_h = max(60, int(font_size * 1.6))
 
-                # Simple escaping for single quotes in text
                 safe_text = text_to_draw.replace("'", "\\'")
-
                 text_cmd = (
                     f'ffmpeg -i "{temp_thumb}" -vf '
                     f'"drawbox=y=0:color=black@0.35:width=iw:height={box_h}:t=fill,'
@@ -942,11 +1039,10 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     f'-c:v mjpeg -q:v 2 -y "{temp_thumb}"'
                 )
                 subprocess.run(text_cmd, shell=True)
-            
+
             thumbnail = temp_thumb if os.path.exists(temp_thumb) else None
 
-        await prog.delete(True)  # ⏳ Remove previous progress message
-
+        await prog.delete(True)
         reply1 = await bot.send_message(channel_id, f" **Uploading Video:**\n<blockquote>{name}</blockquote>")
         reply = await m.reply_text(f"🖼 **Generating Thumbnail:**\n<blockquote>{name}</blockquote>")
 
@@ -955,10 +1051,8 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
         sent_message = None
 
         if file_size_mb < 2000:
-            # 📹 Upload as single video
             dur = int(duration(filename))
             start_time = time.time()
-
             try:
                 sent_message = await bot.send_video(
                     chat_id=channel_id,
@@ -970,7 +1064,7 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     thumb=thumbnail,
                     duration=dur,
                     progress=progress_bar,
-                    progress_args=(reply, start_time)
+                    progress_args=(reply, start_time, name, watermark)
                 )
             except Exception:
                 sent_message = await bot.send_document(
@@ -978,24 +1072,20 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     document=filename,
                     caption=cc,
                     progress=progress_bar,
-                    progress_args=(reply, start_time)
+                    progress_args=(reply, start_time, name, watermark)
                 )
 
-            # ✅ Cleanup
             if os.path.exists(filename):
                 os.remove(filename)
             await reply.delete(True)
             await reply1.delete(True)
 
         else:
-            # ⚠️ Notify about splitting
             notify_split = await m.reply_text(
                 f"⚠️ The video is larger than 2GB ({human_readable_size(os.path.getsize(filename))})\n"
                 f"⏳ Splitting into parts before upload..."
             )
-
             parts = split_large_video(filename)
-
             try:
                 first_part_message = None
                 for idx, part in enumerate(parts):
@@ -1004,7 +1094,6 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     total_parts = len(parts)
                     part_caption = f"{cc}\n\n📦 Part {part_num} of {total_parts}"
                     part_filename = f"{name}_Part{part_num}.mp4"
-
                     upload_msg = await m.reply_text(f"📤 Uploading Part {part_num}/{total_parts}...")
 
                     try:
@@ -1019,7 +1108,7 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                             thumb=thumbnail,
                             duration=part_dur,
                             progress=progress_bar,
-                            progress_args=(upload_msg, time.time())
+                            progress_args=(upload_msg, time.time(), name, watermark)
                         )
                         if first_part_message is None:
                             first_part_message = msg_obj
@@ -1030,7 +1119,7 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                             caption=part_caption,
                             file_name=part_filename,
                             progress=progress_bar,
-                            progress_args=(upload_msg, time.time())
+                            progress_args=(upload_msg, time.time(), name, watermark)
                         )
                         if first_part_message is None:
                             first_part_message = msg_obj
@@ -1038,15 +1127,12 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
                     await upload_msg.delete(True)
                     if os.path.exists(part):
                         os.remove(part)
-
             except Exception as e:
                 raise Exception(f"Upload failed at part {idx + 1}: {str(e)}")
 
-            # ✅ Final messages
             if len(parts) > 1:
                 await m.reply_text("✅ Large video successfully uploaded in multiple parts!")
 
-            # Cleanup after split
             await reply.delete(True)
             await reply1.delete(True)
             if notify_split:
@@ -1054,10 +1140,8 @@ async def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, cha
             if os.path.exists(filename):
                 os.remove(filename)
 
-            # Return first sent part message
             sent_message = first_part_message
 
-        # 🧹 Cleanup generated thumbnail if applicable
         if thumb in ["/d", "no"] and temp_thumb and os.path.exists(temp_thumb):
             os.remove(temp_thumb)
 
