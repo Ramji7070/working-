@@ -280,13 +280,11 @@ def vid_info(info):
 # ==============================
 # FILE DECRYPT FUNCTION
 # ==============================
-import os
-import mmap
-
 def decrypt_file(file_path: str, key: str) -> bool:
     if not file_path or not os.path.exists(file_path):
         return False
 
+    # 👇 NEW SAFETY CHECK
     if os.path.getsize(file_path) == 0:
         print("❌ File is empty, skipping decrypt")
         return False
@@ -295,19 +293,14 @@ def decrypt_file(file_path: str, key: str) -> bool:
         return True
 
     key_bytes = key.encode()
-    key_len = len(key_bytes)
+    size = min(28, os.path.getsize(file_path))
 
-    try:
-        with open(file_path, "r+b") as f:
-            # Map the whole file
-            with mmap.mmap(f.fileno(), length=0, access=mmap.ACCESS_WRITE) as mm:
-                for i in range(len(mm)):
-                    mm[i] ^= key_bytes[i % key_len]  # cycle key properly
-        print(f"✅ Decryption successful: {file_path}")
-        return True
-    except Exception as e:
-        print(f"❌ Decryption failed: {e}")
-        return False
+    with open(file_path, "r+b") as f:
+        with mmap.mmap(f.fileno(), length=size, access=mmap.ACCESS_WRITE) as mm:
+            for i in range(size):
+                mm[i] ^= key_bytes[i] if i < len(key_bytes) else i
+
+    return True
 # ==============================
 # RAW FILE DOWNLOAD
 # ==============================
@@ -864,59 +857,18 @@ async def download_video(url, cmd, name):
     except Exception as exc:
         logging.error(f"Error checking file: {exc}")
         return name
-    
-
-import os
-import subprocess
-
-import os
-import subprocess
-
-def repair_mp4(input_file: str) -> bool:
-    """
-    Repair MP4 file to make it streamable (faststart).
-    Returns True if successful.
-    """
-    if not os.path.exists(input_file):
-        print(f"❌ File not found: {input_file}")
-        return False
-
-    fixed = input_file.replace(".mp4", "_fixed.mp4")
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", input_file,
-            "-map", "0",
-            "-c", "copy",
-            "-movflags", "+faststart",
-            fixed
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            print(f"❌ FFmpeg repair failed:\n{result.stderr.decode()}")
-            return False
-
-        # Replace original file
-        os.replace(fixed, input_file)
-        print(f"✅ MP4 repaired successfully: {input_file}")
-        return True
-
-    except Exception as e:
-        print(f"❌ Exception during repair_mp4: {e}")
-        return False
-
-
 def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling appx m3u8 stream")
         return download_appx_m3u8(url, name)
+    
 
     if "appx" in url and ".zip" in url:
         return process_zip_to_video(url, name)
-
-    if any(domain in url for domain in ["googlevideo.com", "youtube.com", "youtu.be", "embed"]):
+    
+    if "googlevideo.com" in url or "youtube.com" in url or "youtu.be" in url or "embed" in url:
         return download_googlevideo(url, name)
+
 
     video_path = None
     for _ in range(5):  # resume attempts
@@ -927,20 +879,12 @@ def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | No
     if not video_path:
         return None
 
-    # Try decryption first
+    # ✅ अगर decrypt fail भी हो तो original path return करो
     try:
         if decrypt_file(video_path, key):
-            print("🔑 Decryption successful")
-            # Repair if MP4
-            if video_path.endswith(".mp4"):
-                repair_mp4(video_path)
             return video_path
     except Exception as e:
         print(f"⚠️ Decrypt failed: {e}")
-
-    # Even if decryption fails, still repair if MP4
-    if video_path.endswith(".mp4"):
-        repair_mp4(video_path)
 
     return video_path  # fallback
 
