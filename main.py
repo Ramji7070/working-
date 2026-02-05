@@ -1,4 +1,4 @@
-#🔧 Standard Library
+# 🔧 Standard Library
 import os
 import re
 import sys
@@ -78,63 +78,6 @@ from urllib.parse import unquote, urlparse
 from pyrogram.errors import FloodWait
 height = 1080
 width = 1920
-
-
-import os
-import aiohttp
-import aiofiles
-import asyncio
-import mimetypes
-
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-UTKASH_PROXY = os.environ.get("UTKASH_PROXY")  # http://user:pass@ip:port
-
-async def download_pdf_with_proxy(url: str, filename: str):
-    try:
-        if not filename.lower().endswith(".pdf"):
-            filename += ".pdf"
-
-        file_path = os.path.join(DOWNLOAD_DIR, filename)
-
-        timeout = aiohttp.ClientTimeout(total=120)
-
-        connector = aiohttp.TCPConnector(ssl=False)
-
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector
-        ) as session:
-
-            async with session.get(
-                url,
-                proxy=UTKASH_PROXY,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "application/pdf"
-                }
-            ) as resp:
-
-                if resp.status != 200:
-                    raise Exception(f"HTTP ERROR {resp.status}")
-
-                content_type = resp.headers.get("Content-Type", "")
-                if "pdf" not in content_type.lower():
-                    raise Exception("Not a valid PDF file")
-
-                temp_path = file_path + ".part"
-
-                async with aiofiles.open(temp_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 512):
-                        await f.write(chunk)
-
-                os.rename(temp_path, file_path)
-                return file_path
-
-    except Exception as e:
-        print(f"PDF Download Error: {e}")
-        return None
 
 
 # PDF Download function
@@ -1002,7 +945,7 @@ async def txt_handler(bot: Client, m: Message):
                 pass  # handle zip links
 
             elif "childId" in url and "parentId" in url:
-                url = f"https://anonymouspwplayerr-c96de7802811.herokuapp.com/pw?url={url}&token={raw_text4}"
+                url = f"https://anonymouspwplayer-0e5a3f512dec.herokuapp.com/pw?url={url}&token={raw_text4}"
 
             if "edge.api.brightcove.com" in url:
                 pass
@@ -1048,7 +991,7 @@ async def txt_handler(bot: Client, m: Message):
     # Step 3: Store directly in url for downloading
               url = final_url.strip()
             elif "d1d34p8vz63oiq" in url or "sec1.pw.live" in url:
-                url = f"https://anonymouspwplayer-b99f57957198.herokuapp.com/pw?url={url}?token={raw_text4}"
+                url = f"https://anonymouspwplayerr-c96de7802811.herokuapp.com/pw?url={url}&token={raw_text4}"
 
            
             elif 'encrypted.m' in url:
@@ -1072,7 +1015,9 @@ async def txt_handler(bot: Client, m: Message):
                url = before.strip()
                # sirf ? se pehle wale part me change
                path, sep, query = url.partition("?")
-               url = path + sep + query
+               if path.endswith(".mp4"):
+                 path = path[:-4] + ".mkv"
+                 url = path + sep + query
                  
     # URL = * se pehle wala
                
@@ -1106,14 +1051,14 @@ async def txt_handler(bot: Client, m: Message):
             else:
                 ytf = f"b[height<={raw_text2}]/bv[height<={raw_text2}]+ba/b/bv+ba"
                 
-            if "jay" in url:
+            if "jw-prod" in url:
                 url = url.replace("https://apps-s3-jw-prod.utkarshapp.com/admin_v1/file_library/videos","https://d1q5ugnejk3zoi.cloudfront.net/ut-production-jw/admin_v1/file_library/videos")
                 cmd = f'yt-dlp -o "{name}.mp4" "{url}"'
             elif "webvideos.classplusapp." in url:
-                cmd = f'yt-dlp --add-header "referer:https://web.classplusapp.com/" --add-header "x-cdn-tag:empty" -f "{ytf}" "{url}" -o "{name}.mp4"'
+               cmd = f'yt-dlp --add-header "referer:https://web.classplusapp.com/" --add-header "x-cdn-tag:empty" -f "{ytf}" "{url}" -o "{name}.mp4"'
             
             else:
-                 cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
+                cmd = f'yt-dlp -f "{ytf}" "{url}" -o "{name}.mp4"'
 
             try:
                 cc = (
@@ -1251,8 +1196,6 @@ async def txt_handler(bot: Client, m: Message):
                         await m.reply_text(str(e))
                         time.sleep(e.x)
                         continue
-                
-
                 elif "https://apps-s3-prod.utkarshapp.com/admin_v1/file_manager/pdf" in url:
                     try:
                         print(f"⚠️ Utkarsh PDF - sending with thumbnail and buttons")
@@ -1557,7 +1500,6 @@ async def txt_handler(bot: Client, m: Message):
                     prog1 = await m.reply_text(Show1, disable_web_page_preview=True)
                     res_file = await helper.decrypt_and_merge_video(mpd, keys_string, path, name, raw_text2)
                     filename = res_file
-                    await prog1.delete(True)
                     await prog.delete(True)
                     await helper.send_vid(bot, m, cc, filename, thumb, name, prog, channel_id, watermark=watermark )
                     count += 1
