@@ -357,103 +357,63 @@ import subprocess
 import time
 from pathlib import Path
 
-def decrypt_and_merge_video(
-    mpd_url: str,
-    keys_string: str,
-    output_dir: str,
-    output_name: str,
-    quality: str = "720",
-    max_retries: int = 3
-) -> str | None:
+def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
+    try:
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
+        print(f"Running command: {cmd1}")
+        os.system(cmd1)
+        
+        avDir = list(output_path.iterdir())
+        print(f"Downloaded files: {avDir}")
+        print("Decrypting")
 
-    for attempt in range(1, max_retries + 1):
-        print(f"\n🔁 Attempt {attempt}/{max_retries}")
+        video_decrypted = False
+        audio_decrypted = False
 
-        try:
-            # =========================
-            # cmd10 → DOWNLOAD
-            # =========================
-            cmd10 = (
-                f'yt-dlp -f "bv[height<={quality}]+ba/b" '
-                f'-o "{out}/input.%(ext)s" '
-                f'--allow-unplayable-format --no-check-certificate '
-                f'--external-downloader aria2c '
-                f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M" '
-                f'"{mpd_url}"'
-            )
-            print("▶️ cmd10:", cmd10)
-            if subprocess.call(cmd10, shell=True) != 0:
-                raise RuntimeError("Download failed")
+        for data in avDir:
+            if data.suffix == ".mp4" and not video_decrypted:
+                cmd2 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/video.mp4"'
+                print(f"Running command: {cmd2}")
+                os.system(cmd2)
+                if (output_path / "video.mp4").exists():
+                    video_decrypted = True
+                data.unlink()
+            elif data.suffix == ".m4a" and not audio_decrypted:
+                cmd3 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/audio.m4a"'
+                print(f"Running command: {cmd3}")
+                os.system(cmd3)
+                if (output_path / "audio.m4a").exists():
+                    audio_decrypted = True
+                data.unlink()
 
-            # =========================
-            # Detect files
-            # =========================
-            video_enc = next((f for f in out.iterdir() if f.suffix == ".mp4"), None)
-            audio_enc = next((f for f in out.iterdir() if f.suffix == ".m4a"), None)
+        if not video_decrypted or not audio_decrypted:
+            raise FileNotFoundError("Decryption failed: video or audio file not found.")
 
-            if not video_enc or not audio_enc:
-                raise FileNotFoundError("Video/Audio not found")
+        cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy "{output_path}/{output_name}.mp4"'
+        print(f"Running command: {cmd4}")
+        os.system(cmd4)
+        if (output_path / "video.mp4").exists():
+            (output_path / "video.mp4").unlink()
+        if (output_path / "audio.m4a").exists():
+            (output_path / "audio.m4a").unlink()
+        
+        filename = output_path / f"{output_name}.mp4"
 
-            video_dec = out / "video_dec.mp4"
-            audio_dec = out / "audio_dec.m4a"
+        if not filename.exists():
+            raise FileNotFoundError("Merged video file not found.")
 
-            # =========================
-            # cmd11 → VIDEO DECRYPT
-            # =========================
-            cmd11 = f'mp4decrypt {keys_string} "{video_enc}" "{video_dec}"'
-            print("🔓 cmd11:", cmd11)
-            if subprocess.call(cmd11, shell=True) != 0:
-                raise RuntimeError("Video decrypt failed")
+        cmd5 = f'ffmpeg -i "{filename}" 2>&1 | grep "Duration"'
+        duration_info = os.popen(cmd5).read()
+        print(f"Duration info: {duration_info}")
 
-            # =========================
-            # cmd12 → AUDIO DECRYPT
-            # =========================
-            cmd12 = f'mp4decrypt {keys_string} "{audio_enc}" "{audio_dec}"'
-            print("🔓 cmd12:", cmd12)
-            if subprocess.call(cmd12, shell=True) != 0:
-                raise RuntimeError("Audio decrypt failed")
+        return str(filename)
 
-            video_enc.unlink(missing_ok=True)
-            audio_enc.unlink(missing_ok=True)
-
-            # =========================
-            # cmd13 → MERGE (FAST)
-            # =========================
-            final_file = out / f"{output_name}.mp4"
-            cmd13 = (
-                f'ffmpeg -y -loglevel error '
-                f'-i "{video_dec}" -i "{audio_dec}" '
-                f'-c copy -movflags +faststart "{final_file}"'
-            )
-            print("🎬 cmd13:", cmd13)
-            if subprocess.call(cmd13, shell=True) != 0:
-                raise RuntimeError("Merge failed")
-
-            video_dec.unlink(missing_ok=True)
-            audio_dec.unlink(missing_ok=True)
-
-            if final_file.exists() and final_file.stat().st_size > 1024 * 100:
-                print("✅ Video ready successfully!")
-                return str(final_file)
-
-            raise RuntimeError("Final file invalid")
-
-        except Exception as e:
-            print(f"⚠️ Attempt {attempt} failed:", e)
-
-            # CLEANUP BEFORE RETRY
-            for f in out.iterdir():
-                if f.is_file() and f.name != f"{output_name}.mp4":
-                    f.unlink(missing_ok=True)
-
-            time.sleep(2)
-
-    print("❌ All retries failed")
-    return None
-
+    except Exception as e:
+        print(f"Error during decryption and merging: {str(e)}")
+        raise
 
 
 async def run_cmd(cmd):
@@ -616,78 +576,88 @@ base_cmd = (
 )
 
 
-def download_video(url, base_cmd, name):
+import os
+import asyncio
+import subprocess
+import logging
+
+async def download_video(url, name, quality="1080"):
     """
-    Handles all types of URLs: m3u8, YouTube, direct links
-    Fast download using yt-dlp + aria2c
-    Compatible with Heroku / Koyeb
+    Robust async downloader
+    - retries
+    - aria2 fast
+    - heroku / koyeb safe
     """
 
-    # 🔹 Special m3u8 case
-    if "transcoded" in url and url.endswith(".m3u8"):
-        print("⚡ Handling m3u8")
+    # 🔹 special cases
+    if "transcoded" in url and ".m3u8" in url:
+        print("⚡ Handling transcoded m3u8")
         return download_appx_m3u8(url, name)
 
-    max_retries = 2
-    retry_count = 0
+    if "appx" in url and url.endswith(".zip"):
+        print("⚡ Handling appx zip")
+        return process_zip_to_video(url, name)
 
-    # Ensure output template
-    if not name.endswith(".%(ext)s"):
-        output_tpl = f"{name}.%(ext)s"
-    else:
-        output_tpl = name
+    if any(x in url for x in ["youtube.com", "youtu.be", "googlevideo.com"]):
+        print("⚡ Handling YouTube link")
+        return download_from_player(url, name)
 
-    while retry_count < max_retries:
-        download_cmd = (
-            f'{base_cmd} '
-            f'-R 25 --fragment-retries 25 '
-            f'--external-downloader aria2c '
-            f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M" '
-            f'-o "{output_tpl}" "{url}"'
+    # 🔹 output template
+    output_tpl = f"{name}.%(ext)s"
+
+    # 🔹 base command (cmd10)
+    cmd10 = (
+        f'yt-dlp '
+        f'-f "bv[height<={quality}]+ba/b[height<={quality}]/b" '
+        f'--merge-output-format mp4 '
+        f'-o "{output_tpl}" '
+        f'"{url}" '
+        f'-R 25 --fragment-retries 25 '
+        f'--external-downloader aria2c '
+        f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M"'
+    )
+
+    max_retries = 3
+    attempt = 0
+
+    while attempt < max_retries:
+        print(f"\n▶️ Attempt {attempt+1}/{max_retries}")
+        print(cmd10)
+        logging.info(cmd10)
+
+        proc = subprocess.Popen(
+            cmd10,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
         )
 
-        print(f"▶️ Running command:\n{download_cmd}")
+        for line in proc.stdout:
+            print(line, end="")
 
-        try:
-            proc = subprocess.Popen(
-                download_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
+        proc.wait()
 
-            for line in proc.stdout:
-                print(line, end="")
-
-            proc.wait()
-
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode, download_cmd)
-
-            print("✅ Download succeeded")
+        if proc.returncode == 0:
+            print("✅ Download finished")
             break
 
-        except subprocess.CalledProcessError as exc:
-            retry_count += 1
-            print(f"⚠️ Retry {retry_count}/{max_retries} failed")
+        attempt += 1
+        print(f"⚠️ Failed, retrying in 5s...")
+        await asyncio.sleep(5)
 
-            if retry_count >= max_retries:
-                print("❌ All retries failed")
-                return None
+    if attempt >= max_retries:
+        print("❌ All retries failed")
+        return None
 
-    # 🔍 Find actual output file
+    # 🔍 find output safely
     base = os.path.splitext(name)[0]
-    possible_exts = [".mp4", ".mkv", ".webm", ".mp4.webm"]
+    for ext in (".mp4", ".mkv", ".webm", ".mp4.webm"):
+        if os.path.isfile(base + ext):
+            return base + ext
 
-    for ext in possible_exts:
-        file_path = base + ext
-        if os.path.isfile(file_path):
-            return file_path
-
-    print("❌ Download finished but no output file found")
+    print("❌ Download done but file not found")
     return None
-
 
 import os
 import subprocess
