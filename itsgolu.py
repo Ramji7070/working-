@@ -588,58 +588,58 @@ import logging
 import os
 import subprocess
 
-def download_video(url, name, quality="1080"):
+import os
+import subprocess
+
+def download_video(url, name):
     """
-    WORKING + STABLE downloader
-    - same function name
-    - same parameters
-    - fixes: filename-too-long error
-    - fixes: CMD overwrite bug
+    FINAL SAFE VERSION
+    - name same use hoga
+    - function kabhi crash nahi karega
+    - corrupted name ko silently fix karega
     """
 
-    # 🔴 CRITICAL SAFETY FIX
-    # अगर गलती से name में पूरा cmd चला गया हो
-    if name.strip().startswith("yt-dlp"):
-        print("⚠️ name variable corrupted, resetting filename")
+    # 🔒 SILENT SAFETY (NO ERROR)
+    if not name or name.strip().startswith(("http", "yt-dlp")):
+        print("⚠️ Invalid name detected, using fallback filename")
         name = "video"
 
-    # output template (नाम वही use हो रहा है)
-    output_tpl = f"{name}.%(ext)s"
+    name = name.strip()
 
-    # 🔧 FORMAT FIX
-    # hard 1080 lock हटाया (यही error दे रहा था)
-    format_selector = "bv*+ba/b"
+    output_tpl = f"{name}.%(ext)s"
 
     cmd = [
         "yt-dlp",
-        "-f", format_selector,
-        "--merge-output-format", "mp4",
-
-        # 🚀 SPEED (safe for heroku / koyeb)
+        "-f", "bv*+ba/b",
+        "--remux-video", "mp4",
         "--external-downloader", "aria2c",
-        "--external-downloader-args",
-        "aria2c:-x8 -s8 -j8 -k1M",
-
+        "--external-downloader-args", "aria2c:-x8 -s8 -j8 -k1M",
         "-o", output_tpl,
         url
     ]
 
-    print("▶️ CMD RUNNING:")
-    print(" ".join(cmd))
-    print("▶️ OUTPUT TEMPLATE:", output_tpl)
+    print("▶️ CMD:", " ".join(cmd))
 
-    process = subprocess.run(
+    proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
 
-    print(process.stdout)
+    print(proc.stdout)
 
-    if process.returncode != 0:
-        print("❌ Download Failed")
+    if proc.returncode != 0:
+        print("❌ yt-dlp failed")
         return None
+
+    # 🔍 output detect
+    for ext in (".mp4", ".mkv", ".webm"):
+        file = name + ext
+        if os.path.isfile(file):
+            return file
+
+    return None
 
     # 🔍 downloaded file detect
     base = os.path.splitext(name)[0]
