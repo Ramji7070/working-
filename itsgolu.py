@@ -845,7 +845,7 @@ def progress_bar(current, total, reply, start_time, name="{VIDEO}", credit="{CRE
         pass
 
 # ====== Main send_vid function ======
-await def send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id, watermark="{CREDIT}", topic_thread_id: int = None):
+async def  send_vid(bot: Client, m: Message, cc, filename, thumb, name, prog, channel_id, watermark="{CREDIT}", topic_thread_id: int = None):
     try:
         temp_thumb = None  # Ensure always defined
         thumbnail = thumb
