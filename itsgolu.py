@@ -591,66 +591,96 @@ import subprocess
 import os
 import subprocess
 
-def download_video(url, name):
+import os
+import asyncio
+import logging
+import subprocess
+
+# -----------------------------
+# Helper function: sanitize & check file
+# -----------------------------
+def get_existing_file(name):
+    try:
+        if os.path.isfile(name):
+            return name
+
+        base, ext = os.path.splitext(name)
+        candidates = [
+            f"{name}.webm",
+            f"{base}.mp4",
+            f"{base}.mkv",
+            f"{base}.webm",
+            f"{base}.mp4.webm",
+        ]
+        for file in candidates:
+            if os.path.isfile(file):
+                return file
+        return f"{base}.mp4"
+    except Exception as exc:
+        logging.error(f"Error checking file: {exc}")
+        return name
+
+# -----------------------------
+# Download function
+# -----------------------------
+async def download_video(url: str, output_name: str, quality: str = "480p"):
     """
-    FINAL SAFE VERSION
-    - name same use hoga
-    - function kabhi crash nahi karega
-    - corrupted name ko silently fix karega
+    url         : str : video URL (m3u8)
+    output_name : str : desired file name (will sanitize if too long)
+    quality     : str : '144p', '240p', '360p', '480p', '720p', '1080p'
     """
+    # sanitize filename
+    safe_name = "".join(c for c in output_name if c.isalnum() or c in " ._-")
+    if len(safe_name) > 60:
+        safe_name = safe_name[:60]  # truncate long names
+    safe_name += f"_{quality}"
 
-    # 🔒 SILENT SAFETY (NO ERROR)
-    if not name or name.strip().startswith(("http", "yt-dlp")):
-        print("⚠️ Invalid name detected, using fallback filename")
-        name = "video"
+    final_file = get_existing_file(f"{safe_name}.mp4")
 
-    name = name.strip()
-
-    output_tpl = f"{name}.%(ext)s"
-
+    # yt-dlp cmd
     cmd = [
         "yt-dlp",
-        "-f", "bv*+ba/b",
-        "--remux-video", "mp4",
+        "-f", f"b[height<={quality.replace('p','')}] / bv[height<={quality.replace('p','')}] + ba / b / bv + ba",
+        "--merge-output-format", "mp4",
         "--external-downloader", "aria2c",
-        "--external-downloader-args", "aria2c:-x8 -s8 -j8 -k1M",
-        "-o", output_tpl,
+        "--external-downloader-args", "-x8 -s8 -j8 -k1M",
+        "-o", final_file,
         url
     ]
 
-    print("▶️ CMD:", " ".join(cmd))
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
 
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
+        if process.returncode != 0:
+            logging.error(f"Download failed: {stderr.decode()}")
+            return None
 
-    print(proc.stdout)
+        # final check
+        final_file = get_existing_file(final_file)
 
-    if proc.returncode != 0:
-        print("❌ yt-dlp failed")
+        # FFmpeg fix (segfault safe)
+        fixed_file = f"{os.path.splitext(final_file)[0]}_fixed.mp4"
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", final_file,
+            "-c", "copy", "-movflags", "faststart",
+            fixed_file
+        ]
+        try:
+            subprocess.run(ffmpeg_cmd, check=True)
+            return fixed_file
+        except Exception as e:
+            logging.error(f"FFmpeg fix failed: {e}")
+            return final_file
+
+    except Exception as exc:
+        logging.error(f"Download exception: {exc}")
         return None
 
-    # 🔍 output detect
-    for ext in (".mp4", ".mkv", ".webm"):
-        file = name + ext
-        if os.path.isfile(file):
-            return file
-
-    return None
-
-    # 🔍 downloaded file detect
-    base = os.path.splitext(name)[0]
-    for ext in (".mp4", ".mkv", ".webm"):
-        file_path = base + ext
-        if os.path.isfile(file_path):
-            print("✅ Download Success:", file_path)
-            return file_path
-
-    print("❌ Download finished but file not found")
-    return None
 
 import os
 import subprocess
