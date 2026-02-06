@@ -599,6 +599,14 @@ import subprocess
 # -----------------------------
 # Helper function: sanitize & check file
 # -----------------------------
+import os
+import asyncio
+import subprocess
+import logging
+
+# -----------------------------
+# Helper: sanitize/check file
+# -----------------------------
 def get_existing_file(name):
     try:
         if os.path.isfile(name):
@@ -621,65 +629,63 @@ def get_existing_file(name):
         return name
 
 # -----------------------------
-# Download function
+# Async download function
 # -----------------------------
 async def download_video(url: str, output_name: str, quality: str = "480p"):
     """
-    url         : str : video URL (m3u8)
-    output_name : str : desired file name (will sanitize if too long)
-    quality     : str : '144p', '240p', '360p', '480p', '720p', '1080p'
+    Download video using yt-dlp async.
+    url         : video URL
+    output_name : desired file name
+    quality     : '144p', '240p', '360p', '480p', '720p', '1080p'
     """
     # sanitize filename
     safe_name = "".join(c for c in output_name if c.isalnum() or c in " ._-")
     if len(safe_name) > 60:
-        safe_name = safe_name[:60]  # truncate long names
+        safe_name = safe_name[:60]  # truncate
     safe_name += f"_{quality}"
 
     final_file = get_existing_file(f"{safe_name}.mp4")
 
-    # yt-dlp cmd
-    cmd = [
-        "yt-dlp",
-        "-f", f"b[height<={quality.replace('p','')}] / bv[height<={quality.replace('p','')}] + ba / b / bv + ba",
-        "--merge-output-format", "mp4",
-        "--external-downloader", "aria2c",
-        "--external-downloader-args", "-x8 -s8 -j8 -k1M",
-        "-o", final_file,
-        url
-    ]
+    # yt-dlp format string for height <= requested
+    height = quality.replace("p","")
+    yt_format = f"b[height<={height}]/bv[height<={height}]+ba/b/bv+ba"
 
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
+    cmd = f'yt-dlp -f "{yt_format}" --merge-output-format mp4 --external-downloader aria2c --external-downloader-args "-x8 -s8 -j8 -k1M" -o "{final_file}" "{url}"'
+
+    retry_count = 0
+    max_retries = 2
+
+    while retry_count <= max_retries:
+        print(f"▶️ Running: {cmd}")
+        process = await asyncio.create_subprocess_shell(
+            cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
 
-        if process.returncode != 0:
-            logging.error(f"Download failed: {stderr.decode()}")
-            return None
+        if process.returncode == 0:
+            print("✅ Download succeeded")
+            break
 
-        # final check
-        final_file = get_existing_file(final_file)
+        retry_count += 1
+        print(f"⚠️ Download failed (attempt {retry_count}/{max_retries}) retrying in 5s...")
+        await asyncio.sleep(5)
 
-        # FFmpeg fix (segfault safe)
-        fixed_file = f"{os.path.splitext(final_file)[0]}_fixed.mp4"
-        ffmpeg_cmd = [
-            "ffmpeg", "-y", "-i", final_file,
-            "-c", "copy", "-movflags", "faststart",
-            fixed_file
-        ]
-        try:
-            subprocess.run(ffmpeg_cmd, check=True)
-            return fixed_file
-        except Exception as e:
-            logging.error(f"FFmpeg fix failed: {e}")
-            return final_file
+    # check final file
+    final_file = get_existing_file(final_file)
 
-    except Exception as exc:
-        logging.error(f"Download exception: {exc}")
-        return None
+    # FFmpeg faststart fix
+    fixed_file = f"{os.path.splitext(final_file)[0]}_fixed.mp4"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", final_file, "-c", "copy", "-movflags", "faststart", fixed_file],
+            check=True
+        )
+        return fixed_file
+    except Exception as e:
+        logging.error(f"FFmpeg fix failed: {e}")
+        return final_file
 
 
 import os
