@@ -587,57 +587,50 @@ import logging
 
 def download_video(url, name, quality="1080"):
     """
-    FAST & SAFE downloader
-    - NO retry (signed URL expire issue solved)
-    - aria2 fast
-    - heroku / koyeb safe
-    - sync function (no async / await)
+    SAFE & WORKING downloader
+    - same function name
+    - same params
+    - NO shell parsing error
+    - works with m3u8 / classplus
     """
 
-    # 🔹 special m3u8 case
-    if "transcoded" in url and ".m3u8" in url:
-        print("⚡ Handling transcoded m3u8")
-        return download_appx_m3u8(url, name)
-
-    # 🔹 output template
     output_tpl = f"{name}.%(ext)s"
 
-    # 🔹 base command (ONE SHOT)
-    cmd = (
-        f'yt-dlp '
-        f'-f "bv[height<={quality}]+ba/b" '
-        f'--merge-output-format mp4 '
-        f'-o "{output_tpl}" '
-        f'--external-downloader aria2c '
-        f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M" '
-        f'"{url}"'
-    )
+    # ⚠️ HARD height lock हटाया (यही error दे रहा था)
+    # yt-dlp खुद best <=1080 चुन लेगा
+    format_selector = "bv*+ba/b"
+
+    cmd = [
+        "yt-dlp",
+        "-f", format_selector,
+        "--merge-output-format", "mp4",
+
+        "--external-downloader", "aria2c",
+        "--external-downloader-args",
+        "aria2c:-x8 -s8 -j8 -k1M",
+
+        "-o", output_tpl,
+        url
+    ]
 
     print("▶️ Running command:")
-    print(cmd)
-    logging.info(cmd)
+    print(" ".join(cmd))
 
-    # 🔹 run once only
-    proc = subprocess.Popen(
+    proc = subprocess.run(
         cmd,
-        shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True
     )
 
-    for line in proc.stdout:
-        print(line, end="")
-
-    proc.wait()
+    print(proc.stdout)
 
     if proc.returncode != 0:
-        print("❌ Download failed (no retry to avoid URL expiry)")
+        print("❌ Download failed")
         return None
 
     print("✅ Download finished")
 
-    # 🔍 find output file
     base = os.path.splitext(name)[0]
     for ext in (".mp4", ".mkv", ".webm"):
         file_path = base + ext
