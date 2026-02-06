@@ -581,77 +581,68 @@ import asyncio
 import subprocess
 import logging
 
-def download_video(url, cmd, name, quality="1080"):
+import os
+import subprocess
+import logging
+
+def download_video(url, name, quality="1080"):
     """
-    Robust SYNC downloader
-    - retries
+    FAST & SAFE downloader
+    - NO retry (signed URL expire issue solved)
     - aria2 fast
     - heroku / koyeb safe
-    - NO async / await
+    - sync function (no async / await)
     """
 
-    # 🔹 special cases
+    # 🔹 special m3u8 case
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling transcoded m3u8")
         return download_appx_m3u8(url, name)
 
-    if "appx" in url and url.endswith(".zip"):
-        print("⚡ Handling appx zip")
-        return process_zip_to_video(url, name)
-
-    if any(x in url for x in ["youtube.com", "youtu.be", "googlevideo.com"]):
-        print("⚡ Handling YouTube link")
-        return download_from_player(url, name)
-
     # 🔹 output template
     output_tpl = f"{name}.%(ext)s"
 
-    # 🔹 base command
-    download_cmd = (
-        f'{cmd} '
+    # 🔹 base command (ONE SHOT)
+    cmd = (
+        f'yt-dlp '
         f'-f "bv[height<={quality}]+ba/b" '
         f'--merge-output-format mp4 '
-        f'-o "{output_tpl}" "{url}" '
-        f'-R 25 --fragment-retries 25 '
+        f'-o "{output_tpl}" '
         f'--external-downloader aria2c '
-        f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M"'
+        f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M" '
+        f'"{url}"'
     )
 
-    max_retries = 3
+    print("▶️ Running command:")
+    print(cmd)
+    logging.info(cmd)
 
-    for attempt in range(1, max_retries + 1):
-        print(f"\n▶️ Attempt {attempt}/{max_retries}")
-        print(download_cmd)
+    # 🔹 run once only
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
 
-        proc = subprocess.Popen(
-            download_cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+    for line in proc.stdout:
+        print(line, end="")
 
-        for line in proc.stdout:
-            print(line, end="")
+    proc.wait()
 
-        proc.wait()
-
-        if proc.returncode == 0:
-            print("✅ Download finished")
-            break
-
-        print("⚠️ Failed, retrying in 5s...")
-        time.sleep(5)
-
-    else:
-        print("❌ All retries failed")
+    if proc.returncode != 0:
+        print("❌ Download failed (no retry to avoid URL expiry)")
         return None
 
-    # 🔍 detect output safely
+    print("✅ Download finished")
+
+    # 🔍 find output file
     base = os.path.splitext(name)[0]
-    for ext in (".mp4", ".mkv", ".webm", ".mp4.webm"):
-        if os.path.isfile(base + ext):
-            return base + ext
+    for ext in (".mp4", ".mkv", ".webm"):
+        file_path = base + ext
+        if os.path.isfile(file_path):
+            return file_path
 
     print("❌ Download done but file not found")
     return None
