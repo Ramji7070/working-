@@ -581,12 +581,13 @@ import asyncio
 import subprocess
 import logging
 
-def download_video(url, name, quality="1080"):
+def download_video(url, cmd, name, quality="1080"):
     """
-    Robust async downloader
+    Robust SYNC downloader
     - retries
     - aria2 fast
     - heroku / koyeb safe
+    - NO async / await
     """
 
     # 🔹 special cases
@@ -605,28 +606,25 @@ def download_video(url, name, quality="1080"):
     # 🔹 output template
     output_tpl = f"{name}.%(ext)s"
 
-    # 🔹 base command (cmd10)
-    cmd10 = (
-        f'yt-dlp '
-        f'-f "bv[height<={quality}]+ba/b[height<={quality}]/b" '
+    # 🔹 base command
+    download_cmd = (
+        f'{cmd} '
+        f'-f "bv[height<={quality}]+ba/b" '
         f'--merge-output-format mp4 '
-        f'-o "{output_tpl}" '
-        f'"{url}" '
+        f'-o "{output_tpl}" "{url}" '
         f'-R 25 --fragment-retries 25 '
         f'--external-downloader aria2c '
         f'--downloader-args "aria2c:-x4 -j4 -s4 -k1M"'
     )
 
     max_retries = 3
-    attempt = 0
 
-    while attempt < max_retries:
-        print(f"\n▶️ Attempt {attempt+1}/{max_retries}")
-        print(cmd10)
-        logging.info(cmd10)
+    for attempt in range(1, max_retries + 1):
+        print(f"\n▶️ Attempt {attempt}/{max_retries}")
+        print(download_cmd)
 
         proc = subprocess.Popen(
-            cmd10,
+            download_cmd,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -642,15 +640,14 @@ def download_video(url, name, quality="1080"):
             print("✅ Download finished")
             break
 
-        attempt += 1
-        print(f"⚠️ Failed, retrying in 5s...")
-        await asyncio.sleep(5)
+        print("⚠️ Failed, retrying in 5s...")
+        time.sleep(5)
 
-    if attempt >= max_retries:
+    else:
         print("❌ All retries failed")
         return None
 
-    # 🔍 find output safely
+    # 🔍 detect output safely
     base = os.path.splitext(name)[0]
     for ext in (".mp4", ".mkv", ".webm", ".mp4.webm"):
         if os.path.isfile(base + ext):
