@@ -581,7 +581,7 @@ import asyncio
 import subprocess
 import logging
 
-async def download_video(url, name, quality="1080"):
+def download_video(url, name, quality="1080"):
     """
     Robust async downloader
     - retries
