@@ -760,7 +760,7 @@ credit1 = os.environ.get(
     '<a href="https://t.me/Jetha_lal_bot">𝄟⃝🐬🅹🅰🅸 🆂🅷🆁🅸 🆁🅰🅼 ⚡️ 𝄟⃝🐬 💻</a>'
 )
 # ====== Time formatting for ETA ======
-def _fmt_def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
+def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
     safe_name = safe_filename(name)
 
     if "transcoded" in url and ".m3u8" in url:
@@ -794,6 +794,9 @@ def _fmt_def download_and_decrypt_video(url: str, name: str, key: str = None) ->
         return None
 
     return video_pathtime(sec):
+    
+# ====== Time formatting for ETA ======
+def _fmt_time(sec):
     sec = int(sec)
     h = sec // 3600
     m = (sec % 3600) // 60
@@ -802,10 +805,7 @@ def _fmt_def download_and_decrypt_video(url: str, name: str, key: str = None) ->
         return f"{h}h {m}m {s}s"
     elif m > 0:
         return f"{m}m {s}s"
-    return f"{s}s"
-
-# 🔥 Global cache to throttle edits for fast upload
-_LAST_EDIT_TIME = {}
+    return f"{s}s
 
 # ====== Progress bar for uploads ======
 def progress_bar(current, total, reply, start_time, name="{VIDEO}", credit="{CREDIT}"):
