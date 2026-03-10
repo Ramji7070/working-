@@ -1703,5 +1703,32 @@ async def back_to_start_callback(client, callback_query: CallbackQuery):
         ])
     )
 
-print("Bot Started...")
-bot.run()
+import time
+import traceback
+from pyrogram.errors import FloodWait
+
+def start_bot():
+    while True:
+        try:
+            print("=" * 50)
+            print("Bot starting...")
+            print("=" * 50)
+
+            bot.run()
+
+            print("Bot stopped normally.")
+            break
+
+        except FloodWait as e:
+            wait_time = int(getattr(e, "value", 0) or 0)
+            print(f"[FloodWait] {wait_time} seconds wait karna hai.")
+            time.sleep(wait_time + 5)
+
+        except Exception as e:
+            print(f"[Startup Error] {e}")
+            traceback.print_exc()
+            print("10 seconds baad retry hoga...")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    start_bot()
