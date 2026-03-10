@@ -1237,7 +1237,7 @@ async def txt_handler(bot: Client, m: Message):
                     topic = None   # safe dummy value
                     if "*" in url:
                         url = url.split("*")[0]
-                    if "appxsignurl.vercel.app/appx/" in url:
+                    if "https://appxsignurl-omega.vercel.app/appx/" in url:
                         try:
                             # Step 1: Directly use the original URL
                             response = requests.get(url.strip(), timeout=10)
