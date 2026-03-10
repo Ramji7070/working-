@@ -17,3 +17,8 @@ cp "$DIR/ffmpeg" /app/bin/ffmpeg
 cp "$DIR/ffprobe" /app/bin/ffprobe
 
 chmod +x /app/bin/ffmpeg /app/bin/ffprobe
+
+echo "FFMPEG READY"
+ls -l /app/bin
+/app/bin/ffmpeg -version
+/app/bin/ffprobe -version
