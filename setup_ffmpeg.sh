@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-mkdir -p bin
+mkdir -p /app/bin
 cd /tmp
 
-curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-tar -xf ffmpeg.tar.xz
+if command -v curl >/dev/null 2>&1; then
+  curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+else
+  wget -O ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+fi
 
+tar -xf ffmpeg.tar.xz
 DIR=$(find . -maxdepth 1 -type d -name "ffmpeg-*-amd64-static" | head -n 1)
 
 cp "$DIR/ffmpeg" /app/bin/ffmpeg
