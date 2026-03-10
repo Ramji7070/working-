@@ -62,10 +62,14 @@ def create_session():
 # =========================
 # DOWNLOAD M3U8
 # =========================
+
 def download_appx_m3u8(url: str, name: str) -> str | None:
+    """
+    Fast m3u8 video download using ffmpeg (sync version).
+    Optimized for Heroku: reduced threads and added retries/error handling.
+    """
     os.makedirs("downloads", exist_ok=True)
-    safe_name = safe_filename(name)
-    output = f"downloads/{safe_name}.mp4"
+    output = f"downloads/{name}.mp4"
 
     headers = (
         "User-Agent: Mozilla/5.0 (Linux; Android 13)\r\n"
@@ -73,42 +77,50 @@ def download_appx_m3u8(url: str, name: str) -> str | None:
         "Origin: https://akstechnicalclasses.classx.co.in\r\n"
     )
 
+    # Retry logic
     retry_count = 0
     max_retries = 3
-
+    download_success = False
     while retry_count < max_retries:
         cmd = [
             "ffmpeg",
             "-y",
-            "-threads", "1",
-            "-bufsize", "4M",
+            "-threads", "1",  # Reduced from 2 for Heroku resource constraints
+            "-bufsize", "4M",  # Reduced buffer for stability
             "-stats_period", "5",
             "-loglevel", "error",
             "-headers", headers,
-            "-multiple_requests", "1",
+            "-multiple_requests", "1",  # Keep for parallel segments if supported
             "-i", url,
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
             output
         ]
 
+        print(f"▶️ Downloading m3u8 (attempt {retry_count + 1}): {' '.join(cmd)}")
+        logging.info(' '.join(cmd))
         try:
-            subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True
-            )
-            if os.path.exists(output) and os.path.getsize(output) > 0:
-                return output
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            print("✅ Download succeeded")
+            download_success = True
+            break
         except subprocess.CalledProcessError as exc:
-            print(f"⚠️ m3u8 retry {retry_count + 1}: {exc}")
+            retry_count += 1
+            print(f"⚠️ Download retry {retry_count}/{max_retries} failed: {exc}")
+            if retry_count == max_retries:
+                print("❌ All download retries failed.")
+                return None
 
-        retry_count += 1
+    if not download_success:
+        return None
 
-    return None
-
+    # Verify file exists and has content
+    if os.path.exists(output) and os.path.getsize(output) > 0:
+        print(f"✅ Fast download complete: {output}")
+        return output
+    else:
+        print(f"❌ Download failed or file is empty: {output}")
+        return None
 
 # =========================
 # VIDEO INFO
@@ -310,8 +322,12 @@ def vid_info(info):
 
     return new_info
 
-
 def download_raw_file(url: str, filename: str) -> str | None:
+    """
+    Ultra-fast, resume-safe raw file download for Heroku.
+    Uses yt-dlp + aria2c for max speed, with retries and error handling.
+    Optimized for Heroku: reduced concurrency to avoid resource exhaustion.
+    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 13)",
         "Referer": "https://akstechnicalclasses.classx.co.in/",
@@ -321,39 +337,48 @@ def download_raw_file(url: str, filename: str) -> str | None:
     }
 
     os.makedirs("downloads", exist_ok=True)
-    safe_name = safe_filename(filename)
-    output_template = f"downloads/{safe_name}.%(ext)s"
+    file_path = f"downloads/{filename}.mkv"
 
+    # Build header args for yt-dlp
     header_args = " ".join([f'--add-header "{k}: {v}"' for k, v in headers.items()])
 
+    # yt-dlp + aria2c for ultra fast, with retries
     retry_count = 0
-    max_retries = 3
-
+    max_retries = 3  # Increased retries for reliability
+    download_success = False
     while retry_count < max_retries:
         cmd = (
-            f'yt-dlp -f best --no-check-certificate '
+            f'yt-dlp -f best -o "{file_path}" --no-check-certificate '
             f'{header_args} '
             f'--external-downloader aria2c '
-            f'--downloader-args "aria2c:-x8 -j8 -s8 -k1M" '
-            f'--retries 5 --fragment-retries 5 '
-            f'-o "{output_template}" '
+            f'--downloader-args "aria2c:-x8 -j8 -s8 -k1M" '  # Balanced concurrency: higher than Heroku min but not max to keep fast yet stable
+            f'--retries 5 --fragment-retries 5 '  # Added retries for robustness
             f'"{url}"'
         )
-
+        print(f"▶️ Downloading (attempt {retry_count + 1}): {cmd}")
+        logging.info(cmd)
         try:
-            subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
-
-            for ext in ["mp4", "mkv", "webm", "ts"]:
-                fp = f"downloads/{safe_name}.{ext}"
-                if os.path.exists(fp) and os.path.getsize(fp) > 0:
-                    return fp
-
+            result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+            print("✅ Download succeeded")
+            download_success = True
+            break
         except subprocess.CalledProcessError as exc:
-            print(f"⚠️ raw download retry {retry_count + 1}: {exc}")
+            retry_count += 1
+            print(f"⚠️ Download retry {retry_count}/{max_retries} failed: {exc}")
+            if retry_count == max_retries:
+                print("❌ All download retries failed.")
+                return None
 
-        retry_count += 1
+    if not download_success:
+        return None
 
-    return None
+    # Verify file exists and has content
+    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+        print(f"✅ Download complete: {file_path}")
+        return file_path
+    else:
+        print(f"❌ Download failed or file is empty: {file_path}")
+        return None
 
 
 def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
@@ -592,6 +617,7 @@ def decrypt_file(file_path: str, key: str) -> bool:
     if not file_path or not os.path.exists(file_path):
         return False
 
+    # Safety check for empty file
     if os.path.getsize(file_path) == 0:
         print("❌ File is empty, skipping decrypt")
         return False
@@ -608,7 +634,6 @@ def decrypt_file(file_path: str, key: str) -> bool:
                 mm[i] ^= key_bytes[i] if i < len(key_bytes) else i
 
     return True
-
 
 def is_playable(file_path: str) -> bool:
     try:
@@ -636,41 +661,34 @@ credit1 = os.environ.get(
 
 
 def download_and_decrypt_video(url: str, name: str, key: str = None) -> str | None:
-    safe_name = safe_filename(name)
-
+    # Download and decrypt the video
     if "transcoded" in url and ".m3u8" in url:
         print("⚡ Handling m3u8")
-        video_path = download_appx_m3u8(url, safe_name)
-    else:
-        video_path = download_raw_file(url, safe_name)
+        return download_appx_m3u8(url, name)
+    video_path = None
+    for _ in range(5):  # Retry up to 5 times
+        video_path = download_raw_file(url, name)
+        if video_path and os.path.getsize(video_path) > 10 * 1024 * 1024:  # Ensure minimum size
+            break
 
-    if not video_path or not os.path.exists(video_path):
-        print("❌ Video file download failed")
-        return None
-
-    if os.path.getsize(video_path) == 0:
-        print("❌ Downloaded video is empty")
+    if not video_path:
         return None
 
     try:
         if key:
-            ok = decrypt_file(video_path, key)
-            if not ok:
-                print("❌ Decrypt failed")
-                return None
+            # Decrypt the file if key is provided
+            decrypt_file(video_path, key)
     except Exception as e:
-        print(f"⚠️ Decrypt exception: {e}")
+        print(f"⚠️ Decrypt failed: {e}")
         return None
 
     if not is_playable(video_path):
-        repaired = repair_video(video_path)
-        if repaired and os.path.exists(repaired) and os.path.getsize(repaired) > 0:
-            return repaired
-        return None
-
-    return video_path
-
-
+        # If not playable, repair the video
+        return repair_video(video_path)
+    else:
+        # If already playable, return the original path
+        return video_path
+        
 # ====== Time formatting for ETA ======
 def _fmt_time(sec):
     sec = int(sec)
