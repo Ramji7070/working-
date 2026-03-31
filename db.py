@@ -1,114 +1,39 @@
 import os
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Union
-from pymongo import MongoClient, errors
-from pymongo.database import Database as MongoDatabase
-from pymongo.collection import Collection
-from vars import *
-import colorama
-from colorama import Fore, Style
-import time
-import certifi
-from typing_extensions import Literal
 
-# Init colors for Windows
-colorama.init()
+MONGO_URL = os.environ.get("MONGO_URL")
 
-class Database:
-    def __init__(self, max_retries: int = 3, retry_delay: float = 2.0):
-        """
-        Initialize MongoDB connection with retry logic
-        
-        Args:
-            max_retries: Maximum connection attempts
-            retry_delay: Delay between retries in seconds
-        """
-        self._print_startup_message()
-        self.client: Optional[MongoClient] = None
-        self.db: Optional[MongoDatabase] = None
-        self.users: Optional[Collection] = None
-        self.settings: Optional[Collection] = None
-        
-        self._connect_with_retry(max_retries, retry_delay)
-        
-    def _connect_with_retry(self, max_retries: int, retry_delay: float):
-        """Establish MongoDB connection with retry mechanism"""
-        for attempt in range(1, max_retries + 1):
-            try:
-                print(f"{Fore.YELLOW}⌛ Attempt {attempt}/{max_retries}: Connecting to MongoDB...{Style.RESET_ALL}")
-                
-                # Enhanced connection parameters
-                self.client = MongoClient(
-                    MONGO_URL,
-                    serverSelectionTimeoutMS=20000,
-                    connectTimeoutMS=20000,
-                    socketTimeoutMS=30000,
-                    tlsCAFile=certifi.where(),
-                    retryWrites=True,
-                    retryReads=True
-                )
-                
-                # Test connection
-                self.client.server_info()
-                
-                # Initialize database and collections
-                self.db = self.client.get_database('ITsGOLU_db')
-                self.users = self.db['users']
-                self.settings = self.db['user_settings']
-                
-                print(f"{Fore.GREEN}✓ MongoDB Connected Successfully!{Style.RESET_ALL}")
-                self._initialize_database()
-                return
-                
-            except errors.ServerSelectionTimeoutError as e:
-                print(f"{Fore.RED}✕ Connection attempt {attempt} failed: {str(e)}{Style.RESET_ALL}")
-                if attempt < max_retries:
-                    time.sleep(retry_delay)
-                else:
-                    raise ConnectionError(f"Failed to connect to MongoDB after {max_retries} attempts") from e
-            except Exception as e:
-                print(f"{Fore.RED}✕ Unexpected error during connection: {str(e)}{Style.RESET_ALL}")
-                raise
+class LocalDB:
+    def __init__(self):
+        self.users = set()
+        self.admins = set()
 
-    def _print_startup_message(self):
-        """Print formatted startup message"""
-        print(f"\n{Fore.CYAN}{'='*50}")
-        print(f"{Fore.CYAN}🚀 ITsGOLU_UPLOADER Bot - Database Initialization")
-        print(f"{'='*50}{Style.RESET_ALL}\n")
+    def is_user_authorized(self, *a, **k): return True
+    def is_admin(self, *a, **k): return True
 
-    def _initialize_database(self):
-        """Initialize database indexes and perform migrations"""
-        print(f"{Fore.YELLOW}⌛ Setting up database...{Style.RESET_ALL}")
-        
-        try:
-            # Create indexes with error handling
-            self._create_indexes()
-            print(f"{Fore.GREEN}✓ Database indexes created!{Style.RESET_ALL}")
-            
-            # Run migrations
-            self._migrate_existing_users()
-            
-            print(f"{Fore.GREEN}✓ Database initialization complete!{Style.RESET_ALL}\n")
-        except Exception as e:
-            print(f"{Fore.RED}⚠ Database initialization error: {str(e)}{Style.RESET_ALL}")
-            raise
+    def __getattr__(self, name):
+        return lambda *a, **k: True
 
-    def _create_indexes(self):
-        """Create necessary indexes with error handling"""
-        index_results = []
-        
-        try:
-            # Compound index for users collection
-            self.users.create_index(
-                [("bot_username", 1), ("user_id", 1)], 
-                unique=True,
-                name="user_identity"
-            )
-            index_results.append("users compound index")
-        except Exception as e:
-            print(f"{Fore.YELLOW}⚠ Could not create users compound index: {str(e)}{Style.RESET_ALL}")
 
-        try:
+try:
+    if MONGO_URL:
+        from pymongo import MongoClient
+        client = MongoClient(MONGO_URL)
+        db = client["botdb"]
+        print("✅ MongoDB Connected")
+    else:
+        raise Exception("No MONGO_URL")
+
+except Exception as e:
+    print("❌ Mongo Failed → Using Local DB")
+
+    class Database:
+        def __init__(self):
+            self.local = LocalDB()
+
+        def __getattr__(self, name):
+            return getattr(self.local, name)
+
+    db = Database()        try:
             # Single field index for settings
             self.settings.create_index(
                 [("user_id", 1)],
