@@ -4,7 +4,7 @@ from os import environ
 # API Configuration
 API_ID = int(os.environ.get("API_ID", ""))
 API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8183087959:AAF7J3bzEFnEQXdS4IdzNk-UoVL_Vs1zNjE")
 
 CREDIT = os.environ.get(
     "CREDIT",
