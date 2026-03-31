@@ -31,7 +31,8 @@ itsdangerous
 # Crypto & Security
 pycryptodome==3.18.0
 pyaes==1.6.1
-cryptography==42.0.5
+cryptography==38.0.4
+pillow==8.4.0
 pyopenssl==24.1.0
 PyJWT==2.8.0
 
@@ -39,7 +40,7 @@ PyJWT==2.8.0
 yt-dlp==2025.06.30
 mutagen==1.46.0
 ffmpeg-python==0.2.0
-pillow==9.5.0
+
 m3u8==6.0.0
 pytube==15.0.0
 
