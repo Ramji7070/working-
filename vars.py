@@ -2,8 +2,8 @@ import os
 from os import environ
 
 # API Configuration
-API_ID = int(os.environ.get("API_ID", ""))
-API_HASH = os.environ.get("API_HASH", "")
+API_ID = int(os.environ.get("API_ID", "28088290"))
+API_HASH = os.environ.get("API_HASH", "6998f2c585fdce65ac72dfa23d02b6ec")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8183087959:AAF7J3bzEFnEQXdS4IdzNk-UoVL_Vs1zNjE")
 
 CREDIT = os.environ.get(
@@ -13,7 +13,7 @@ CREDIT = os.environ.get(
 
 # MongoDB Configuration
 DATABASE_NAME = os.environ.get("DATABASE_NAME", "CpprivateApi")
-DATABASE_URL = os.environ.get("DATABASE_URL", "mongodb+srv://itsgoluAPI:jrMHSipToKUEnmcp@cpprivateapi.ghhp3oz.mongodb.net/?appName=CpprivateApi")  # Add your own atlas db
+DATABASE_URL = os.environ.get("DATABASE_URL", "mongodb://mongo:BXavFoDdwOVfKVMfPGfrXJrbScYzMDZN@interchange.proxy.rlwy.net:13028")  # Add your own atlas db
 MONGO_URL = DATABASE_URL  # For auth system
 
 # Owner and Admin Configuration
