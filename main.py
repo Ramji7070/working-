@@ -79,7 +79,20 @@ from pyrogram.errors import FloodWait
 height = 1080
 width = 1920
 
+from flask import Flask
+import threading
 
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot is running!"
+
+def run_web():
+    app_flask.run(host="0.0.0.0", port=8000)
+
+# Start web server in thread
+threading.Thread(target=run_web).start()
 # PDF Download function
 '''def download_pdf(url: str, filename: str) -> str | None:
     url = unquote(url)
